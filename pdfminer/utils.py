@@ -18,6 +18,13 @@ from typing import (
 
 from pdfminer.pdfexceptions import PDFTypeError, PDFValueError
 
+try:
+    import pdfminer_core as _core
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 if TYPE_CHECKING:
     from pdfminer.layout import LTComponent
 
@@ -131,6 +138,8 @@ def apply_tiff_predictor(
     https://www.itu.int/itudoc/itu-t/com16/tiff-fx/docs/tiff6.pdf
     (Section 14, page 64)
     """
+    if _HAS_RUST:
+        return bytes(_core.apply_tiff_predictor(colors, columns, bitspercomponent, data))
     if bitspercomponent != 8:
         error_msg = f"Unsupported `bitspercomponent': {bitspercomponent}"
         raise PDFValueError(error_msg)
@@ -161,14 +170,18 @@ def apply_png_predictor(
 
     Documentation: http://www.libpng.org/pub/png/spec/1.2/PNG-Filters.html
     """
+    if _HAS_RUST:
+        return bytes(
+            _core.apply_png_predictor(pred, colors, columns, bitspercomponent, data)
+        )
     if bitspercomponent not in [8, 1]:
         msg = f"Unsupported `bitspercomponent': {bitspercomponent}"
         raise PDFValueError(msg)
 
     nbytes = colors * columns * bitspercomponent // 8
-    bpp = colors * bitspercomponent // 8  # number of bytes per complete pixel
+    bpp = max(1, colors * bitspercomponent // 8)  # number of bytes per complete pixel
     buf = bytearray()
-    line_above = bytearray(columns)
+    line_above = bytearray(nbytes)
     for scanline_i in range(0, len(data), nbytes + 1):
         filter_type = data[scanline_i]
         line_encoded = data[scanline_i + 1 : scanline_i + 1 + nbytes]
@@ -268,9 +281,11 @@ def parse_rect(o: Any) -> Rect:
 
 
 def mult_matrix(m1: Matrix, m0: Matrix) -> Matrix:
+    """Returns the multiplication of two matrices."""
+    if _HAS_RUST:
+        return _core.mult_matrix(m1, m0)
     (a1, b1, c1, d1, e1, f1) = m1
     (a0, b0, c0, d0, e0, f0) = m0
-    """Returns the multiplication of two matrices."""
     return (
         a0 * a1 + c0 * b1,
         b0 * a1 + d0 * b1,
@@ -287,6 +302,8 @@ def translate_matrix(m: Matrix, v: Point) -> Matrix:
     The matrix is changed so that its origin is at the specified point in its own
     coordinate system. Note that this is different from translating it within the
     original coordinate system."""
+    if _HAS_RUST:
+        return _core.translate_matrix(m, v)
     (a, b, c, d, e, f) = m
     (x, y) = v
     return a, b, c, d, x * a + y * c + e, x * b + y * d + f
@@ -294,6 +311,8 @@ def translate_matrix(m: Matrix, v: Point) -> Matrix:
 
 def apply_matrix_pt(m: Matrix, v: Point) -> Point:
     """Applies a matrix to a point."""
+    if _HAS_RUST:
+        return _core.apply_matrix_pt(m, v)
     (a, b, c, d, e, f) = m
     (x, y) = v
     return a * x + c * y + e, b * x + d * y + f
@@ -310,6 +329,8 @@ def apply_matrix_rect(m: Matrix, rect: Rect) -> Rect:
     :returns a rectangle with the same orientation, but that would fit the rotated
         content.
     """
+    if _HAS_RUST:
+        return _core.apply_matrix_rect(m, rect)
     (x0, y0, x1, y1) = rect
     left_bottom = (x0, y0)
     right_bottom = (x1, y0)
@@ -331,6 +352,8 @@ def apply_matrix_rect(m: Matrix, rect: Rect) -> Rect:
 
 def apply_matrix_norm(m: Matrix, v: Point) -> Point:
     """Equivalent to apply_matrix_pt(M, (p,q)) - apply_matrix_pt(M, (0,0))"""
+    if _HAS_RUST:
+        return _core.apply_matrix_norm(m, v)
     (a, b, c, d, _e, _f) = m
     (p, q) = v
     return a * p + c * q, b * p + d * q
