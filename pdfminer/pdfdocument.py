@@ -48,6 +48,17 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import (  # type: ignore[import]
+        parse_xref_stream as _parse_xref_stream_rust,
+        parse_xref_table as _parse_xref_table_rust,
+        scan_pdf_objects as _scan_pdf_objects_rust,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 
 class PDFNoValidXRef(PDFSyntaxError):
     pass
@@ -130,6 +141,42 @@ class PDFXRef(PDFBaseXRef):
         return f"<PDFXRef: offsets={self.offsets.keys()!r}>"
 
     def load(self, parser: PDFParser) -> None:
+        if _HAS_RUST:
+            self._load_rust(parser)
+        else:
+            self._load_python(parser)
+
+    def _load_rust(self, parser: PDFParser) -> None:
+        # parser.bufpos + parser.charpos is the logical read position;
+        # fp.tell() may be ahead because the parser buffers reads.
+        start_pos = parser.bufpos + parser.charpos
+        parser.fp.seek(start_pos)
+        raw = parser.fp.read()
+        trailer_rel = raw.find(b"trailer")
+        if trailer_rel == -1:
+            # No trailer found — fall back.
+            parser.seek(start_pos)
+            self._load_python(parser)
+            return
+        trailer_pos = start_pos + trailer_rel
+        xref_bytes = raw[:trailer_rel]
+
+        try:
+            entries = _parse_xref_table_rust(xref_bytes)
+        except ValueError:
+            parser.seek(start_pos)
+            self._load_python(parser)
+            return
+
+        for objid, genno, offset, in_use in entries:
+            if in_use:
+                self.offsets[objid] = (None, offset, genno)
+
+        log.debug("xref objects (rust): %r", self.offsets)
+        parser.seek(trailer_pos)
+        self.load_trailer(parser)
+
+    def _load_python(self, parser: PDFParser) -> None:
         while True:
             try:
                 (pos, line) = parser.nextline()
@@ -210,6 +257,66 @@ class PDFXRefFallback(PDFXRef):
     PDFOBJ_CUE = re.compile(r"^(\d+)\s+(\d+)\s+obj\b")
 
     def load(self, parser: PDFParser) -> None:
+        if _HAS_RUST:
+            self._load_rust(parser)
+        else:
+            self._load_python(parser)
+
+    def _expand_objstm(self, parser: PDFParser, objid: int, pos: int) -> None:
+        """If the object at `pos` is an ObjStm, register its member objects."""
+        parser.seek(pos)
+        try:
+            (_, obj) = parser.nextobject()
+        except PSEOF:
+            return
+        if not (isinstance(obj, PDFStream) and obj.get("Type") is LITERAL_OBJSTM):
+            return
+        stream = stream_value(obj)
+        try:
+            n = stream["N"]
+        except KeyError:
+            if settings.STRICT:
+                raise PDFSyntaxError(f"N is not defined: {stream!r}") from None
+            n = 0
+        parser1 = PDFStreamParser(stream.get_data())
+        objs: list[int] = []
+        try:
+            while 1:
+                (_, obj) = parser1.nextobject()
+                objs.append(cast(int, obj))
+        except PSEOF:
+            pass
+        n = min(n, len(objs) // 2)
+        for index in range(n):
+            objid1 = objs[index * 2]
+            self.offsets[objid1] = (objid, index, 0)
+
+    def _load_rust(self, parser: PDFParser) -> None:
+        parser.fp.seek(0)
+        pdf_data = parser.fp.read()
+
+        # Locate the last "trailer" that begins on its own line.
+        trailer_pos = -1
+        search_pos = 0
+        while True:
+            idx = pdf_data.find(b"trailer", search_pos)
+            if idx == -1:
+                break
+            if idx == 0 or pdf_data[idx - 1] in (ord(b"\n"), ord(b"\r")):
+                trailer_pos = idx
+                break
+            search_pos = idx + 1
+
+        for objid, genno, pos in _scan_pdf_objects_rust(pdf_data):
+            self.offsets[objid] = (None, pos, genno)
+            self._expand_objstm(parser, objid, pos)
+
+        if trailer_pos >= 0:
+            parser.seek(trailer_pos)
+            self.load_trailer(parser)
+            log.debug("trailer (rust): %r", self.trailer)
+
+    def _load_python(self, parser: PDFParser) -> None:
         parser.seek(0)
         while 1:
             try:
@@ -229,29 +336,7 @@ class PDFXRefFallback(PDFXRef):
             objid = int(objid_s)
             genno = int(genno_s)
             self.offsets[objid] = (None, pos, genno)
-            # expand ObjStm.
-            parser.seek(pos)
-            (_, obj) = parser.nextobject()
-            if isinstance(obj, PDFStream) and obj.get("Type") is LITERAL_OBJSTM:
-                stream = stream_value(obj)
-                try:
-                    n = stream["N"]
-                except KeyError:
-                    if settings.STRICT:
-                        raise PDFSyntaxError(f"N is not defined: {stream!r}") from None
-                    n = 0
-                parser1 = PDFStreamParser(stream.get_data())
-                objs: list[int] = []
-                try:
-                    while 1:
-                        (_, obj) = parser1.nextobject()
-                        objs.append(cast(int, obj))
-                except PSEOF:
-                    pass
-                n = min(n, len(objs) // 2)
-                for index in range(n):
-                    objid1 = objs[index * 2]
-                    self.offsets[objid1] = (objid, index, 0)
+            self._expand_objstm(parser, objid, pos)
 
 
 class PDFXRefStream(PDFBaseXRef):
@@ -262,6 +347,7 @@ class PDFXRefStream(PDFBaseXRef):
         self.fl2: int | None = None
         self.fl3: int | None = None
         self.ranges: list[tuple[int, int]] = []
+        self._rust_cache: dict[int, tuple[int, int, int]] | None = None
 
     def __repr__(self) -> str:
         return f"<PDFXRefStream: ranges={self.ranges!r}>"
@@ -291,45 +377,77 @@ class PDFXRefStream(PDFBaseXRef):
             self.fl3,
         )
 
+    def _build_rust_cache(self) -> dict[int, tuple[int, int, int]]:
+        assert self.data is not None
+        assert self.fl1 is not None and self.fl2 is not None and self.fl3 is not None
+        w = [self.fl1, self.fl2, self.fl3]
+        index: list[int] = []
+        for start, count in self.ranges:
+            index.extend([start, count])
+        return {
+            objid: (entry_type, f2, f3)
+            for entry_type, objid, f2, f3 in _parse_xref_stream_rust(self.data, w, index)
+        }
+
     def get_trailer(self) -> dict[str, Any]:
         return self.trailer
 
     def get_objids(self) -> Iterator[int]:
-        for start, nobjs in self.ranges:
-            for i in range(nobjs):
-                assert self.entlen is not None
-                assert self.data is not None
-                offset = self.entlen * i
-                ent = self.data[offset : offset + self.entlen]
-                f1 = nunpack(ent[: self.fl1], 1)
-                if f1 == 1 or f1 == 2:
-                    yield start + i
+        if _HAS_RUST:
+            if self._rust_cache is None:
+                self._rust_cache = self._build_rust_cache()
+            for objid, (entry_type, _f2, _f3) in self._rust_cache.items():
+                if entry_type == 1 or entry_type == 2:
+                    yield objid
+        else:
+            for start, nobjs in self.ranges:
+                for i in range(nobjs):
+                    assert self.entlen is not None
+                    assert self.data is not None
+                    offset = self.entlen * i
+                    ent = self.data[offset : offset + self.entlen]
+                    f1 = nunpack(ent[: self.fl1], 1)
+                    if f1 == 1 or f1 == 2:
+                        yield start + i
 
     def get_pos(self, objid: int) -> tuple[int | None, int, int]:
-        index = 0
-        for start, nobjs in self.ranges:
-            if start <= objid and objid < start + nobjs:
-                index += objid - start
-                break
+        if _HAS_RUST:
+            if self._rust_cache is None:
+                self._rust_cache = self._build_rust_cache()
+            if objid not in self._rust_cache:
+                raise PDFKeyError(objid)
+            entry_type, f2, f3 = self._rust_cache[objid]
+            if entry_type == 1:
+                return (None, f2, f3)
+            elif entry_type == 2:
+                return (f2, f3, 0)
             else:
-                index += nobjs
+                raise PDFKeyError(objid)
         else:
-            raise PDFKeyError(objid)
-        assert self.entlen is not None
-        assert self.data is not None
-        assert self.fl1 is not None and self.fl2 is not None and self.fl3 is not None
-        offset = self.entlen * index
-        ent = self.data[offset : offset + self.entlen]
-        f1 = nunpack(ent[: self.fl1], 1)
-        f2 = nunpack(ent[self.fl1 : self.fl1 + self.fl2])
-        f3 = nunpack(ent[self.fl1 + self.fl2 :])
-        if f1 == 1:
-            return (None, f2, f3)
-        elif f1 == 2:
-            return (f2, f3, 0)
-        else:
-            # this is a free object
-            raise PDFKeyError(objid)
+            index = 0
+            for start, nobjs in self.ranges:
+                if start <= objid < start + nobjs:
+                    index += objid - start
+                    break
+                else:
+                    index += nobjs
+            else:
+                raise PDFKeyError(objid)
+            assert self.entlen is not None
+            assert self.data is not None
+            assert self.fl1 is not None and self.fl2 is not None and self.fl3 is not None
+            offset = self.entlen * index
+            ent = self.data[offset : offset + self.entlen]
+            f1 = nunpack(ent[: self.fl1], 1)
+            f2 = nunpack(ent[self.fl1 : self.fl1 + self.fl2])
+            f3 = nunpack(ent[self.fl1 + self.fl2 :])
+            if f1 == 1:
+                return (None, f2, f3)
+            elif f1 == 2:
+                return (f2, f3, 0)
+            else:
+                # this is a free object
+                raise PDFKeyError(objid)
 
 
 class PDFStandardSecurityHandler:
