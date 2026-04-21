@@ -651,6 +651,7 @@ wheels = [
 
 [[package]]
 name = "pdfminer-six"
+version = "20250421.0"
 source = { editable = "." }
 dependencies = [
     { name = "charset-normalizer" },

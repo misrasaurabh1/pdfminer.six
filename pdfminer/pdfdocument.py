@@ -48,6 +48,13 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import build_xref_lookup as _build_xref_lookup
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 
 class PDFNoValidXRef(PDFSyntaxError):
     pass
@@ -125,6 +132,7 @@ class PDFXRef(PDFBaseXRef):
     def __init__(self) -> None:
         self.offsets: dict[int, tuple[int | None, int, int]] = {}
         self.trailer: dict[str, Any] = {}
+        self._rust_lookup: dict[int, int] = {}
 
     def __repr__(self) -> str:
         return f"<PDFXRef: offsets={self.offsets.keys()!r}>"
@@ -179,6 +187,16 @@ class PDFXRef(PDFBaseXRef):
 
         log.debug("xref objects: %r", self.offsets)
         self.load_trailer(parser)
+        if _HAS_RUST:
+            # Cache direct-offset entries in a Rust HashMap for faster int-key lookup.
+            # Object-stream entries (strmid != None) are skipped; self.offsets handles them.
+            self._rust_lookup = _build_xref_lookup(
+                [
+                    (objid, offset)
+                    for objid, (strmid, offset, _genno) in self.offsets.items()
+                    if strmid is None
+                ]
+            )
 
     def load_trailer(self, parser: PDFParser) -> None:
         try:
@@ -200,6 +218,8 @@ class PDFXRef(PDFBaseXRef):
         return self.offsets.keys()
 
     def get_pos(self, objid: int) -> tuple[int | None, int, int]:
+        if _HAS_RUST and objid not in self._rust_lookup and objid not in self.offsets:
+            raise PDFKeyError(objid)
         return self.offsets[objid]
 
 
