@@ -5,6 +5,13 @@ from typing import BinaryIO, cast
 
 from pdfminer.pdfexceptions import PDFEOFError, PDFException
 
+try:
+    from pdfminer_core import lzw_decode as _lzw_decode_rust  # type: ignore[import-not-found]
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +108,12 @@ class LZWDecoder:
 
 
 def lzwdecode(data: bytes) -> bytes:
+    """Decode LZW-compressed data.
+
+    Uses the Rust implementation when available, falling back to pure Python.
+    """
+    if _HAS_RUST:
+        return bytes(_lzw_decode_rust(data))
     fp = BytesIO(data)
     s = LZWDecoder(fp).run()
     return b"".join(s)
