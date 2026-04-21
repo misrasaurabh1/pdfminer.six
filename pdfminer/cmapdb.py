@@ -27,6 +27,13 @@ from typing import (
     cast,
 )
 
+try:
+    from pdfminer_core import cmap_decode as _cmap_decode_rust  # type: ignore[import-not-found]
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 from pdfminer.encodingdb import name2unicode
 from pdfminer.pdfexceptions import PDFException, PDFTypeError
 from pdfminer.psexceptions import PSEOF, PSSyntaxError
@@ -89,8 +96,13 @@ class CMap(CMapBase):
 
     def decode(self, code: bytes) -> Iterator[int]:
         log.debug("decode: %r, %r", self, code)
+        if _HAS_RUST and self.code2cid:
+            return iter(_cmap_decode_rust(self.code2cid, code))
+        return self._decode_python(code)
+
+    def _decode_python(self, code: bytes) -> Iterator[int]:
         d = self.code2cid
-        for i in iter(code):
+        for i in code:
             if i in d:
                 x = d[i]
                 if isinstance(x, int):
