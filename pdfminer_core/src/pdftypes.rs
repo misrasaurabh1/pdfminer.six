@@ -37,29 +37,6 @@ fn flate_decode(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-/// Decompress deflate data byte-by-byte, stopping at CRC/checksum errors.
-/// Mirrors Python's `decompress_corrupted` — used only when the fast path fails.
-fn flate_decode_tolerant(data: &[u8]) -> Vec<u8> {
-    // Read as much decompressed data as possible before hitting a CRC error.
-    // ZlibDecoder's `read` will return an error at the first bad byte,
-    // but everything decompressed so far is in `output`.
-    let mut dec = ZlibDecoder::new(data);
-    let mut output = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match dec.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => output.extend_from_slice(&buf[..n]),
-            Err(_) => {
-                // Stop at CRC checksum error (same as Python's decompress_corrupted).
-                // Data already in `output` is retained.
-                break;
-            }
-        }
-    }
-    output
-}
-
 fn ascii85_decode(data: &[u8]) -> Result<Vec<u8>, String> {
     // Strip leading "<~" / "~" and trailing "~>" / "~"
     let data = strip_ascii85_markers(data);
@@ -258,11 +235,8 @@ fn apply_single_filter(
     data: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let decoded = match filter_name {
-        // FlateDecode — on error, raise so the Python path can use its
-        // `decompress_corrupted` logic which correctly handles partial data.
-        "FlateDecode" | "Fl" => {
-            flate_decode(&data).map_err(|e| e)?
-        }
+        // On error the Python fallback uses decompress_corrupted for partial recovery.
+        "FlateDecode" | "Fl" => flate_decode(&data)?,
         // LZWDecode
         "LZWDecode" | "LZW" => lzw_decode_impl(&data)?,
         // ASCII85Decode
@@ -275,7 +249,7 @@ fn apply_single_filter(
         "DCTDecode" | "DCT" | "JPXDecode" | "JBIG2Decode" => data,
         // Unsupported — signal the Python fallback
         "CCITTFaxDecode" | "CCF" => {
-            return Err(format!("CCITTFaxDecode not supported in Rust path"));
+            return Err("CCITTFaxDecode not supported in Rust path".to_string());
         }
         "Crypt" => {
             return Err("/Crypt filter is not supported in Rust path".to_string());

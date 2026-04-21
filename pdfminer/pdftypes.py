@@ -16,9 +16,25 @@ from pdfminer.ascii85 import ascii85decode, asciihexdecode
 from pdfminer.ccitt import ccittfaxdecode
 from pdfminer.lzw import lzwdecode
 from pdfminer.pdfexceptions import PDFKeyError
-from pdfminer.psparser import LIT, PSObject
+from pdfminer.psparser import LIT, PSObject, literal_name
 from pdfminer.runlength import rldecode
 from pdfminer.utils import apply_png_predictor, apply_tiff_predictor
+
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        decode_stream_filters as _decode_stream_filters_rust,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
+def _filter_name(f: Any) -> str:
+    """Return the plain string name for a filter literal or raw bytes value."""
+    if isinstance(f, bytes):
+        return f.decode("latin-1")
+    return literal_name(f)
 
 if TYPE_CHECKING:
     from pdfminer.pdfdocument import PDFDocument
@@ -37,6 +53,26 @@ LITERALS_CCITTFAX_DECODE = (LIT("CCITTFaxDecode"), LIT("CCF"))
 LITERALS_DCT_DECODE = (LIT("DCTDecode"), LIT("DCT"))
 LITERALS_JBIG2_DECODE = (LIT("JBIG2Decode"),)
 LITERALS_JPX_DECODE = (LIT("JPXDecode"),)
+
+# Filter names handled natively by the Rust decode_stream_filters function.
+_RUST_SUPPORTED_FILTERS: frozenset[str] = frozenset(
+    {
+        "FlateDecode",
+        "Fl",
+        "LZWDecode",
+        "LZW",
+        "ASCII85Decode",
+        "A85",
+        "ASCIIHexDecode",
+        "AHx",
+        "RunLengthDecode",
+        "RL",
+        "DCTDecode",
+        "DCT",
+        "JPXDecode",
+        "JBIG2Decode",
+    }
+)
 
 
 class DecipherCallable(Protocol):
@@ -321,6 +357,19 @@ class PDFStream(PDFObject):
             self.data = data
             self.rawdata = None
             return
+
+        if _HAS_RUST:
+            rust_filters: list[tuple[str, dict[str, Any]]] = [
+                (_filter_name(f), dict(params) if params else {})
+                for f, params in filters
+            ]
+            if all(n in _RUST_SUPPORTED_FILTERS for n, _ in rust_filters):
+                try:
+                    self.data = _decode_stream_filters_rust(data, rust_filters)
+                    self.rawdata = None
+                    return
+                except Exception:
+                    pass  # fall through to Python path
         for f, params in filters:
             if f in LITERALS_FLATE_DECODE:
                 # will get errors if the document is encrypted.
