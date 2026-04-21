@@ -1,0 +1,3 @@
+[workspace]
+members = ["pdfminer_core"]
+resolver = "2"

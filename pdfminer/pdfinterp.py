@@ -52,6 +52,32 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Optional Rust acceleration for the text-rendering hot path.
+# Falls back to pure Python when the extension is not built.
+# ---------------------------------------------------------------------------
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        apply_text_advance as _rust_apply_text_advance,
+        mult_matrix_rust as _rust_mult_matrix,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
+def _advance_text_matrix(
+    matrix: Matrix,
+    tx: float,
+    ty: float,
+) -> tuple[float, float]:
+    """Return (new_e, new_f) after advancing text position by (tx, ty)."""
+    if _HAS_RUST:
+        return _rust_apply_text_advance(matrix, tx, ty)  # type: ignore[return-value]
+    a, b, c, d, e, f = matrix
+    return tx * a + ty * c + e, tx * b + ty * d + f
+
 
 class PDFResourceError(PDFException):
     pass
@@ -496,7 +522,7 @@ class PDFPageInterpreter:
                 (a1, b1, c1, d1, e1, f1),
             )
         else:
-            self.ctm = mult_matrix(matrix, self.ctm)
+            self.ctm = _rust_mult_matrix(matrix, self.ctm) if _HAS_RUST else mult_matrix(matrix, self.ctm)
             self.device.set_ctm(self.ctm)
 
     def do_w(self, linewidth: PDFStackT) -> None:
@@ -1198,9 +1224,8 @@ class PDFPageInterpreter:
         tx_ = safe_float(tx)
         ty_ = safe_float(ty)
         if tx_ is not None and ty_ is not None:
-            (a, b, c, d, e, f) = self.textstate.matrix
-            e_new = tx_ * a + ty_ * c + e
-            f_new = tx_ * b + ty_ * d + f
+            a, b, c, d, _, _ = self.textstate.matrix
+            e_new, f_new = _advance_text_matrix(self.textstate.matrix, tx_, ty_)
             self.textstate.matrix = (a, b, c, d, e_new, f_new)
 
         elif settings.STRICT:
@@ -1218,9 +1243,8 @@ class PDFPageInterpreter:
         ty_ = safe_float(ty)
 
         if tx_ is not None and ty_ is not None:
-            (a, b, c, d, e, f) = self.textstate.matrix
-            e_new = tx_ * a + ty_ * c + e
-            f_new = tx_ * b + ty_ * d + f
+            a, b, c, d, _, _ = self.textstate.matrix
+            e_new, f_new = _advance_text_matrix(self.textstate.matrix, tx_, ty_)
             self.textstate.matrix = (a, b, c, d, e_new, f_new)
 
         elif settings.STRICT:
@@ -1256,15 +1280,9 @@ class PDFPageInterpreter:
 
     def do_T_a(self) -> None:
         """Move to start of next text line"""
-        (a, b, c, d, e, f) = self.textstate.matrix
-        self.textstate.matrix = (
-            a,
-            b,
-            c,
-            d,
-            self.textstate.leading * c + e,
-            self.textstate.leading * d + f,
-        )
+        a, b, c, d, _, _ = self.textstate.matrix
+        e_new, f_new = _advance_text_matrix(self.textstate.matrix, 0.0, self.textstate.leading)
+        self.textstate.matrix = (a, b, c, d, e_new, f_new)
         self.textstate.linematrix = (0, 0)
 
     def do_TJ(self, seq: PDFStackT) -> None:
