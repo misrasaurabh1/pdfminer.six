@@ -49,6 +49,7 @@ dev = [
     "ruff",
     "mypy",
     "pytest",
+    "pytest-benchmark",
     "pre-commit",
     "codespell",
 ]
@@ -104,6 +105,7 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["RUF001", "RUF012"]  # Allow ambiguous unicode and mutable class attributes in tests
+"benchmarks/*" = ["T201"]  # Allow print() in benchmark scripts
 
 [tool.mypy]
 warn_unused_configs = true
