@@ -1,1 +1,0 @@
-/home/saurabh/pdfminer.six/.claude/worktrees/agent-ab49bc98/pdfminer_core/target/release/libpdfminer_core.so: /home/saurabh/pdfminer.six/.claude/worktrees/agent-ab49bc98/pdfminer_core/src/codecs/ccitt.rs /home/saurabh/pdfminer.six/.claude/worktrees/agent-ab49bc98/pdfminer_core/src/codecs/mod.rs /home/saurabh/pdfminer.six/.claude/worktrees/agent-ab49bc98/pdfminer_core/src/lib.rs
