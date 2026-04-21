@@ -27,6 +27,18 @@ $(CMAPDST)/to-unicode-Adobe-Korea1.json.gz: $(CMAPSRC)/cid2code_Adobe_Korea1.txt
 	$(CONV_CMAP) -c KSC-EUC=euc-kr -c KSC-Johab=johab -c KSCms-UHC=cp949 -c UniKS-UTF8=utf-8 \
 		$(CMAPDST) Adobe-Korea1 $(CMAPSRC)/cid2code_Adobe_Korea1.txt
 
+.PHONY: build-rust
+build-rust:  ## Build Rust extension in release mode with maturin
+	maturin develop --release
+
+.PHONY: build-rust-debug
+build-rust-debug:  ## Build Rust extension in debug mode with maturin
+	maturin develop
+
+.PHONY: test-rust
+test-rust:  ## Run Rust unit tests with cargo
+	cargo test --manifest-path pdfminer_core/Cargo.toml
+
 .PHONY: help
 help:  ## Show this help message
 	@echo "Usage: make [target]"

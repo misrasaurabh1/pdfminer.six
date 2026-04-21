@@ -32,6 +32,15 @@ from pdfminer.utils import (
 logger = logging.getLogger(__name__)
 
 
+try:
+    from pdfminer_core import (  # type: ignore[import]
+        group_chars_into_lines as _group_chars_into_lines,
+    )
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
 class IndexAssigner:
     def __init__(self, index: int = 0) -> None:
         self.index = index
@@ -904,6 +913,30 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         # By now only groups are in the plane
         return [cast(LTTextGroup, g) for g in plane]
 
+    def _group_objects_fast(
+        self,
+        laparams: LAParams,
+        objs: list["LTChar"],
+    ) -> "Iterator[LTTextLine]":
+        """Rust-accelerated version of group_objects for horizontal-only text.
+
+        Uses pdfminer_core.group_chars_into_lines to determine grouping, then
+        constructs Python LTTextLine objects with the same logic as the Python
+        fallback.  All LT* objects remain Python instances for full
+        compatibility.
+        """
+        char_bboxes = [(obj.x0, obj.y0, obj.x1, obj.y1) for obj in objs]
+        groups = _group_chars_into_lines(
+            char_bboxes,
+            laparams.line_overlap,
+            laparams.char_margin,
+        )
+        for group_indices in groups:
+            line: LTTextLine = LTTextLineHorizontal(laparams.word_margin)
+            for idx in group_indices:
+                line.add(objs[idx])
+            yield line
+
     def analyze(self, laparams: LAParams) -> None:
         # textobjs is a list of LTChar objects, i.e.
         # it has all the individual characters in the page.
@@ -912,7 +945,12 @@ class LTLayoutContainer(LTContainer[LTComponent]):
             obj.analyze(laparams)
         if not textobjs:
             return
-        textlines = list(self.group_objects(laparams, textobjs))
+        if _HAS_RUST and not laparams.detect_vertical:
+            textlines = list(
+                self._group_objects_fast(laparams, textobjs)
+            )
+        else:
+            textlines = list(self.group_objects(laparams, textobjs))
         (empties, textlines) = fsplit(lambda obj: obj.is_empty(), textlines)
         for obj in empties:
             obj.analyze(laparams)

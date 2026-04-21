@@ -10,7 +10,6 @@
 #    "FACSIMILE CODING SCHEMES AND CODING CONTROL FUNCTIONS
 #    FOR GROUP 4 FACSIMILE APPARATUS"
 
-
 import array
 from collections.abc import Callable, Iterator, MutableSequence, Sequence
 from typing import (

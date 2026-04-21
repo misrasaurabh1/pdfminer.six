@@ -4,6 +4,18 @@ import re
 from base64 import a85decode
 from binascii import unhexlify
 
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        ascii85decode as _ascii85_rust,
+    )
+    from pdfminer_core import (
+        asciihexdecode as _asciihex_rust,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 start_re = re.compile(rb"^\s*<?\s*~\s*")
 end_re = re.compile(rb"\s*~\s*>?\s*$")
 
@@ -22,6 +34,8 @@ def ascii85decode(data: bytes) -> bytes:
     ASCII85 digits, so we can't strip them.  We settle on a compromise
     where we strip leading `<~` or `~` and trailing `~` or `~>`.
     """
+    if _HAS_RUST:
+        return bytes(_ascii85_rust(data))
     data = start_re.sub(b"", data)
     data = end_re.sub(b"", data)
     return a85decode(data)
@@ -39,6 +53,8 @@ def asciihexdecode(data: bytes) -> bytes:
     the EOD marker after reading an odd number of hexadecimal digits, it
     will behave as if a 0 followed the last digit.
     """
+    if _HAS_RUST:
+        return bytes(_asciihex_rust(data))
     data = bws_re.sub(b"", data)
     idx = data.find(b">")
     if idx != -1:

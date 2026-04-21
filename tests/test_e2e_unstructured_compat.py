@@ -148,10 +148,11 @@ class TestPSBaseParserMonkeyPatch:
         assert callable(parser._parse1)
 
     def test_parser_has_tokens(self) -> None:
-        """PSBaseParser instances have a ._tokens list."""
+        """PSBaseParser instances have a ._tokens sequence (list or deque)."""
+        import collections
         parser = PSBaseParser(io.BytesIO(b"true"))
         assert hasattr(parser, "_tokens")
-        assert isinstance(parser._tokens, list)
+        assert isinstance(parser._tokens, (list, collections.deque))
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+
 def get_widths(seq: Iterable[object]) -> dict[str | int, float]:
     """Build a mapping of character widths for horizontal writing."""
     widths: dict[int, float] = {}

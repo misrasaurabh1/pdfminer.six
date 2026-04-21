@@ -32,3 +32,8 @@ poetry.lock
 .claude/
 .junie/
 *~
+
+# Rust build artifacts
+/target/
+pdfminer_core/target/
+*.swp

@@ -57,6 +57,28 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import (
+        format_bbox as _format_bbox_rust,
+    )
+    from pdfminer_core import (
+        xml_escape as _xml_escape_rust,
+    )
+
+    def _bbox2str(bbox: Rect) -> str:
+        return _format_bbox_rust(bbox)
+
+    def _enc(x: str) -> str:
+        if isinstance(x, bytes):
+            return ""
+        return _xml_escape_rust(x)
+
+    _HAS_RUST = True
+except ImportError:
+    _bbox2str = bbox2str
+    _enc = enc
+    _HAS_RUST = False
+
 
 class PDFLayoutAnalyzer(PDFTextDevice):
     cur_item: LTLayoutContainer
@@ -476,7 +498,7 @@ class HTMLConverter(PDFConverter[AnyIO]):
         self.write("</body></html>\n")
 
     def write_text(self, text: str) -> None:
-        self.write(enc(text))
+        self.write(_enc(text))
 
     def place_rect(
         self,
@@ -514,7 +536,7 @@ class HTMLConverter(PDFConverter[AnyIO]):
         if self.imagewriter is not None:
             name = self.imagewriter.export_image(item)
             s = (
-                f'<img src="{enc(name)}" border="{borderwidth}" '
+                f'<img src="{_enc(name)}" border="{borderwidth}" '
                 'style="position:absolute; '
                 f"left:{x * self.scale}px; "
                 f'top:{(self._yoffset - y) * self.scale}px;" '
@@ -730,16 +752,16 @@ class XMLConverter(PDFConverter[AnyIO]):
     def write_text(self, text: str) -> None:
         if self.stripcontrol:
             text = self.CONTROL.sub("", text)
-        self.write(enc(text))
+        self.write(_enc(text))
 
     def receive_layout(self, ltpage: LTPage) -> None:
         def show_group(item: LTItem) -> None:
             if isinstance(item, LTTextBox):
                 self.write(
-                    f'<textbox id="{item.index}" bbox="{bbox2str(item.bbox)}" />\n'
+                    f'<textbox id="{item.index}" bbox="{_bbox2str(item.bbox)}" />\n'
                 )
             elif isinstance(item, LTTextGroup):
-                self.write(f'<textgroup bbox="{bbox2str(item.bbox)}">\n')
+                self.write(f'<textgroup bbox="{_bbox2str(item.bbox)}">\n')
                 for child in item:
                     show_group(child)
                 self.write("</textgroup>\n")
@@ -749,7 +771,7 @@ class XMLConverter(PDFConverter[AnyIO]):
             if isinstance(item, LTPage):
                 s = (
                     f'<page id="{item.pageid}" '
-                    f'bbox="{bbox2str(item.bbox)}" '
+                    f'bbox="{_bbox2str(item.bbox)}" '
                     f'rotate="{item.rotate}">\n'
                 )
                 self.write(s)
@@ -765,32 +787,32 @@ class XMLConverter(PDFConverter[AnyIO]):
                 s = (
                     f"<line "
                     f'linewidth="{item.linewidth}" '
-                    f'bbox="{bbox2str(item.bbox)}" />\n'
+                    f'bbox="{_bbox2str(item.bbox)}" />\n'
                 )
                 self.write(s)
             elif isinstance(item, LTRect):
                 s = (
                     f"<rect "
                     f'linewidth="{item.linewidth}" '
-                    f'bbox="{bbox2str(item.bbox)}" />\n'
+                    f'bbox="{_bbox2str(item.bbox)}" />\n'
                 )
                 self.write(s)
             elif isinstance(item, LTCurve):
                 s = (
                     f"<curve "
                     f'linewidth="{item.linewidth}" '
-                    f'bbox="{bbox2str(item.bbox)}" '
+                    f'bbox="{_bbox2str(item.bbox)}" '
                     f'pts="{item.get_pts()}"/>\n'
                 )
                 self.write(s)
             elif isinstance(item, LTFigure):
-                s = f'<figure name="{item.name}" bbox="{bbox2str(item.bbox)}">\n'
+                s = f'<figure name="{item.name}" bbox="{_bbox2str(item.bbox)}">\n'
                 self.write(s)
                 for child in item:
                     render(child)
                 self.write("</figure>\n")
             elif isinstance(item, LTTextLine):
-                self.write(f'<textline bbox="{bbox2str(item.bbox)}">\n')
+                self.write(f'<textline bbox="{_bbox2str(item.bbox)}">\n')
                 for child in item:
                     render(child)
                 self.write("</textline>\n")
@@ -798,7 +820,10 @@ class XMLConverter(PDFConverter[AnyIO]):
                 wmode = ""
                 if isinstance(item, LTTextBoxVertical):
                     wmode = ' wmode="vertical"'
-                s = f'<textbox id="{item.index}" bbox="{bbox2str(item.bbox)}"{wmode}>\n'
+                s = (
+                    f'<textbox id="{item.index}"'
+                    f' bbox="{_bbox2str(item.bbox)}"{wmode}>\n'
+                )
                 self.write(s)
                 for child in item:
                     render(child)
@@ -806,8 +831,8 @@ class XMLConverter(PDFConverter[AnyIO]):
             elif isinstance(item, LTChar):
                 s = (
                     f"<text "
-                    f'font="{enc(item.fontname)}" '
-                    f'bbox="{bbox2str(item.bbox)}" '
+                    f'font="{_enc(item.fontname)}" '
+                    f'bbox="{_bbox2str(item.bbox)}" '
                     f'colourspace="{item.ncs.name}" '
                     f'ncolour="{item.graphicstate.ncolor}" '
                     f'size="{item.size:.3f}">'
@@ -822,7 +847,7 @@ class XMLConverter(PDFConverter[AnyIO]):
                     name = self.imagewriter.export_image(item)
                     self.write(
                         f"<image "
-                        f'src="{enc(name)}" '
+                        f'src="{_enc(name)}" '
                         f'width="{item.width}" '
                         f'height="{item.height}" />\n'
                     )

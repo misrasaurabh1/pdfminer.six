@@ -49,6 +49,7 @@ from pdfminer.utils import (
 log = logging.getLogger(__name__)
 
 
+
 class PDFNoValidXRef(PDFSyntaxError):
     pass
 

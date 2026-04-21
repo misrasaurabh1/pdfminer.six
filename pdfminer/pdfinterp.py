@@ -52,6 +52,25 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+try:
+    import pdfminer_core as _pdfminer_core  # type: ignore[import-not-found]
+
+    _rust_apply_text_advance = _pdfminer_core.apply_text_advance
+    _rust_mult_matrix = _pdfminer_core.mult_matrix
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
+def _text_advance(
+    matrix: tuple[float, float, float, float, float, float], tx: float, ty: float
+) -> tuple[float, float]:
+    """Compute new (e, f) after moving text position by (tx, ty)."""
+    if _HAS_RUST:
+        return _rust_apply_text_advance(matrix, tx, ty)
+    a, b, c, d, e, f = matrix
+    return tx * a + ty * c + e, tx * b + ty * d + f
+
 
 class PDFResourceError(PDFException):
     pass
@@ -496,7 +515,11 @@ class PDFPageInterpreter:
                 (a1, b1, c1, d1, e1, f1),
             )
         else:
-            self.ctm = mult_matrix(matrix, self.ctm)
+            self.ctm = (
+                _rust_mult_matrix(matrix, self.ctm)
+                if _HAS_RUST
+                else mult_matrix(matrix, self.ctm)
+            )
             self.device.set_ctm(self.ctm)
 
     def do_w(self, linewidth: PDFStackT) -> None:
@@ -1199,8 +1222,7 @@ class PDFPageInterpreter:
         ty_ = safe_float(ty)
         if tx_ is not None and ty_ is not None:
             (a, b, c, d, e, f) = self.textstate.matrix
-            e_new = tx_ * a + ty_ * c + e
-            f_new = tx_ * b + ty_ * d + f
+            e_new, f_new = _text_advance((a, b, c, d, e, f), tx_, ty_)
             self.textstate.matrix = (a, b, c, d, e_new, f_new)
 
         elif settings.STRICT:
@@ -1219,8 +1241,7 @@ class PDFPageInterpreter:
 
         if tx_ is not None and ty_ is not None:
             (a, b, c, d, e, f) = self.textstate.matrix
-            e_new = tx_ * a + ty_ * c + e
-            f_new = tx_ * b + ty_ * d + f
+            e_new, f_new = _text_advance((a, b, c, d, e, f), tx_, ty_)
             self.textstate.matrix = (a, b, c, d, e_new, f_new)
 
         elif settings.STRICT:
@@ -1257,14 +1278,8 @@ class PDFPageInterpreter:
     def do_T_a(self) -> None:
         """Move to start of next text line"""
         (a, b, c, d, e, f) = self.textstate.matrix
-        self.textstate.matrix = (
-            a,
-            b,
-            c,
-            d,
-            self.textstate.leading * c + e,
-            self.textstate.leading * d + f,
-        )
+        e_new, f_new = _text_advance((a, b, c, d, e, f), 0.0, self.textstate.leading)
+        self.textstate.matrix = (a, b, c, d, e_new, f_new)
         self.textstate.linematrix = (0, 0)
 
     def do_TJ(self, seq: PDFStackT) -> None:

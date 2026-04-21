@@ -12,6 +12,14 @@ HEXADECIMAL = re.compile(r"[0-9a-fA-F]+")
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import (
+        glyph_name_to_unicode as _rust_glyph_name_to_unicode,  # type: ignore[import]
+    )
+    _HAS_RUST_GLYPHLIST = True
+except ImportError:
+    _HAS_RUST_GLYPHLIST = False
+
 
 def name2unicode(name: str) -> str:
     """Converts Adobe glyph names to Unicode numbers.
@@ -39,6 +47,8 @@ def name2unicode(name: str) -> str:
     if len(components) > 1:
         return "".join(map(name2unicode, components))
 
+    elif _HAS_RUST_GLYPHLIST and (cp := _rust_glyph_name_to_unicode(name)) is not None:
+        return chr(cp)
     elif name in glyphname2unicode:
         return glyphname2unicode[name]
 
