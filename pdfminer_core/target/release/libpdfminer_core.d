@@ -1,1 +1,0 @@
-/home/saurabh/pdfminer.six/.claude/worktrees/agent-a3d6fceb/pdfminer_core/target/release/libpdfminer_core.so: /home/saurabh/pdfminer.six/.claude/worktrees/agent-a3d6fceb/pdfminer_core/src/lib.rs /home/saurabh/pdfminer.six/.claude/worktrees/agent-a3d6fceb/pdfminer_core/src/matrix.rs
