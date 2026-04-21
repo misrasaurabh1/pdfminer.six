@@ -17,6 +17,23 @@ from pdfminer.utils import choplist
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import tokenize_ps_buffer as _tokenize_rust
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+# Token-type constants returned by the Rust tokenizer
+_RUST_TOK_INT = 0
+_RUST_TOK_FLOAT = 1
+_RUST_TOK_STRING = 2
+_RUST_TOK_LITERAL = 3
+_RUST_TOK_KEYWORD = 4
+_RUST_TOK_HEXSTRING = 5
+_RUST_TOK_TRUE = 6
+_RUST_TOK_FALSE = 7
+
 
 # Adding aliases for these exceptions for backwards compatibility
 PSException = psexceptions.PSException
@@ -156,6 +173,44 @@ ESC_STRING = {
 
 
 PSBaseParserToken = Union[float, bool, PSLiteral, PSKeyword, bytes]
+
+
+def _convert_rust_tokens(
+    raw: list[tuple[int, int, bytes]],
+) -> list[tuple[int, PSBaseParserToken]]:
+    """Convert the Rust tokenizer's raw output to Python PSBaseParserToken tuples.
+
+    Each raw item is ``(position, type_int, value_bytes)`` where type_int is one
+    of the ``_RUST_TOK_*`` constants defined at module level.
+    """
+    result: list[tuple[int, PSBaseParserToken]] = []
+    for pos, ttype, value in raw:
+        token: PSBaseParserToken
+        if ttype == _RUST_TOK_INT:
+            with contextlib.suppress(ValueError):
+                token = int(value)
+                result.append((pos, token))
+        elif ttype == _RUST_TOK_FLOAT:
+            with contextlib.suppress(ValueError):
+                token = float(value)
+                result.append((pos, token))
+        elif ttype == _RUST_TOK_STRING:
+            result.append((pos, value))
+        elif ttype == _RUST_TOK_LITERAL:
+            try:
+                name: str | bytes = str(value, "utf-8")
+            except Exception:
+                name = value
+            result.append((pos, LIT(name)))
+        elif ttype == _RUST_TOK_KEYWORD:
+            result.append((pos, KWD(value)))
+        elif ttype == _RUST_TOK_HEXSTRING:
+            result.append((pos, value))
+        elif ttype == _RUST_TOK_TRUE:
+            result.append((pos, True))
+        elif ttype == _RUST_TOK_FALSE:
+            result.append((pos, False))
+    return result
 
 
 class PSBaseParser:
@@ -483,6 +538,26 @@ class PSBaseParser:
         if self.eof:
             # It's not really unexpected, come on now...
             raise PSEOF("Unexpected EOF")
+
+        # Try Rust batch tokenization when in the main (non-partial) state.
+        # Only safe when _parse1 == _parse_main and no partial token is in progress.
+        if (
+            _HAS_RUST
+            and not self._tokens
+            and self._parse1 is self._parse_main
+            and not self._curtoken
+            and self.buf
+            and self.charpos < len(self.buf)
+        ):
+            remaining = self.buf[self.charpos:]
+            base = self.bufpos + self.charpos
+            raw_tokens, consumed = _tokenize_rust(remaining, base)
+            if consumed > 0:
+                self.charpos += consumed
+            if raw_tokens:
+                self._tokens.extend(_convert_rust_tokens(raw_tokens))
+
+        # Python fallback (handles partial tokens, edge cases, and non-main states).
         while not self._tokens:
             try:
                 changed_stream = self.fillbuf()
