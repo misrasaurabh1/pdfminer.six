@@ -21,6 +21,13 @@ from typing import (
 
 from pdfminer.pdfexceptions import PDFException, PDFValueError
 
+try:
+    from pdfminer_core import ccitt_decode as _ccitt_decode_rust
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 
 def get_bytes(data: bytes) -> Iterator[int]:
     yield from data
@@ -554,6 +561,20 @@ class CCITTFaxDecoder(CCITTG4Parser):
 
 
 def ccittfaxdecode(data: bytes, params: dict[str, object]) -> bytes:
+    if _HAS_RUST:
+        return bytes(
+            _ccitt_decode_rust(
+                data,
+                k=int(params.get("K", 0)),  # type: ignore[arg-type]
+                columns=int(params.get("Columns", 1728)),  # type: ignore[arg-type]
+                rows=int(params.get("Rows", 0)),  # type: ignore[arg-type]
+                end_of_line=bool(params.get("EndOfLine", False)),
+                black_is_1=bool(params.get("BlackIs1", False)),
+                damaged_rows_before_error=int(  # type: ignore[arg-type]
+                    params.get("DamagedRowsBeforeError", 0)
+                ),
+            )
+        )
     K = params.get("K")
     if K == -1:
         cols = cast(int, params.get("Columns"))
