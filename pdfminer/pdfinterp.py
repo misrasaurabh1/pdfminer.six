@@ -326,7 +326,7 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                     # Store tokens in a plain list and use an index counter for
                     # O(1) access — avoids O(n) list.pop(0) per token.
                     self._pretokenized_list: list[
-                        tuple[int, "PSBaseParserToken"]
+                        tuple[int, PSBaseParserToken]
                     ] = _convert_rust_tokens(raw_tokens)
                     self._pretokenized_pos: int = 0
                     self._rust_pretokenized = True
@@ -338,10 +338,10 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
     def nexttoken(self) -> tuple[int, PSBaseParserToken]:
         """Return the next token, using O(1) index access when pre-tokenized."""
         if self._rust_pretokenized:
-            pos = self._pretokenized_pos
-            if pos < len(self._pretokenized_list):
-                self._pretokenized_pos = pos + 1
-                tok = self._pretokenized_list[pos]
+            idx = self._pretokenized_pos
+            if idx < len(self._pretokenized_list):
+                self._pretokenized_pos = idx + 1
+                tok = self._pretokenized_list[idx]
                 if log.isEnabledFor(logging.DEBUG):
                     log.debug("nexttoken: %r", tok)
                 return tok

@@ -26,35 +26,33 @@ pub fn split_ops_and_operands(
     ps_keyword_class: &Bound<'_, PyAny>,
 ) -> PyResult<PyObject> {
     let result = PyList::empty_bound(py);
-    let mut operands: Vec<PyObject> = Vec::new();
+    // Most PDF operators take ≤6 operands; pre-allocate to avoid small reallocations.
+    let mut operands: Vec<PyObject> = Vec::with_capacity(8);
 
     for item in tokens.iter() {
         // Each item is a 2-tuple (pos, token).
         let tup = item.downcast::<PyTuple>()?;
-        // Index 1 is the token object.
         let token = tup.get_item(1)?;
-        // Check if this token is a PSKeyword instance.
         if token.is_instance(ps_keyword_class)? {
-            // Get the raw keyword bytes via its `.name` attribute.
+            // Extract the keyword name bytes from PSKeyword.name.
             let name_attr = token.getattr("name")?;
             let kw_bytes: Vec<u8> = if let Ok(b) = name_attr.downcast::<PyBytes>() {
                 b.as_bytes().to_vec()
             } else {
-                // name might be str (for keywords stored as str)
-                let s: String = name_attr.extract()?;
-                s.into_bytes()
+                // PSKeyword.name is bytes in normal usage; str is a fallback.
+                name_attr.extract::<String>()?.into_bytes()
             };
             let py_ops = PyList::new_bound(py, operands.iter().map(|o| o.bind(py)));
             let kw_obj: PyObject = PyBytes::new_bound(py, &kw_bytes).into();
             let pair = PyTuple::new_bound(py, [py_ops.into_any(), kw_obj.into_bound(py)]);
             result.append(pair)?;
-            operands = Vec::new();
+            operands.clear();
         } else {
             operands.push(token.into());
         }
     }
 
-    // Any trailing operands without a keyword.
+    // Trailing operands without a closing keyword.
     if !operands.is_empty() {
         let py_ops = PyList::new_bound(py, operands.iter().map(|o| o.bind(py)));
         let none_obj = py.None().into_bound(py);
