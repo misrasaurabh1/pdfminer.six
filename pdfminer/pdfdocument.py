@@ -26,6 +26,7 @@ from pdfminer.pdfexceptions import (
 from pdfminer.pdfparser import PDFParser, PDFStreamParser, PDFSyntaxError
 from pdfminer.pdftypes import (
     DecipherCallable,
+    PDFObjRef,
     PDFStream,
     decipher_all,
     dict_value,
@@ -48,6 +49,17 @@ from pdfminer.utils import (
 
 log = logging.getLogger(__name__)
 
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        parse_pdf_object_at as _parse_pdf_object_at_rust,
+    )
+
+    _HAS_RUST_PARSER = True
+except ImportError:
+    _HAS_RUST_PARSER = False
+
+# Chunk size for the Rust fast-path object parser.
+_RUST_PARSE_CHUNK = 4096
 
 
 class PDFNoValidXRef(PDFSyntaxError):
@@ -805,6 +817,23 @@ class PDFDocument:
 
     def _getobj_parse(self, pos: int, objid: int) -> object:
         assert self._parser is not None
+
+        # Fast path: try to parse the object entirely in Rust.
+        if _HAS_RUST_PARSER and not self.decipher:
+            self._parser.fp.seek(pos)
+            chunk = self._parser.fp.read(_RUST_PARSE_CHUNK)
+            if chunk:
+                result = _parse_pdf_object_at_rust(
+                    chunk,
+                    objid,
+                    LIT,
+                    lambda oid: PDFObjRef(self, oid),
+                )
+                if result is not None:
+                    obj, _consumed = result
+                    self._parser.seek(pos + _consumed)
+                    return obj
+
         self._parser.seek(pos)
         (_, objid1) = self._parser.nexttoken()  # objid
         (_, _genno) = self._parser.nexttoken()  # genno

@@ -25,17 +25,17 @@ enum PsToken {
 // ─── Byte classification helpers ─────────────────────────────────────────────
 
 #[inline(always)]
-fn is_whitespace(b: u8) -> bool {
+pub(crate) fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c' | b'\x00')
 }
 
 #[inline(always)]
-fn is_delimiter(b: u8) -> bool {
+pub(crate) fn is_delimiter(b: u8) -> bool {
     matches!(b, b'%' | b'/' | b'[' | b']' | b'(' | b')' | b'<' | b'>' | b'{' | b'}')
 }
 
 #[inline(always)]
-fn is_end_keyword(b: u8) -> bool {
+pub(crate) fn is_end_keyword(b: u8) -> bool {
     is_whitespace(b) || is_delimiter(b) || b == b'#'
 }
 
@@ -304,7 +304,7 @@ fn tokenize_buffer(data: &[u8], base_offset: usize) -> (Vec<(usize, PsToken)>, u
 /// Decode a PS hex string (whitespace allowed between hex digits).
 ///
 /// Single-pass: no intermediate digit buffer is allocated.
-fn decode_hex_string(hex_bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn decode_hex_string(hex_bytes: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity((hex_bytes.len() + 1) / 2);
     let mut hi: Option<u8> = None;
     for &b in hex_bytes {
@@ -327,7 +327,7 @@ fn decode_hex_string(hex_bytes: &[u8]) -> Vec<u8> {
 }
 
 #[inline(always)]
-fn hex_nibble(b: u8) -> u8 {
+pub(crate) fn hex_nibble(b: u8) -> u8 {
     match b {
         b'0'..=b'9' => b - b'0',
         b'a'..=b'f' => b - b'a' + 10,
@@ -340,7 +340,7 @@ fn hex_nibble(b: u8) -> u8 {
 ///
 /// Returns `Some((bytes, new_pos))` where `new_pos` is past the closing ')`.
 /// Returns `None` if the string is incomplete (buffer boundary).
-fn parse_literal_string(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+pub(crate) fn parse_literal_string(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
     let n = data.len();
     let mut result = Vec::new();
     let mut i = start;

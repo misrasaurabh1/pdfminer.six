@@ -148,8 +148,24 @@ def resolve1(x: object, default: object = None) -> Any:
     """
     if not isinstance(x, PDFObjRef):
         return x
+    # Inline the cached path: avoids 3 extra Python method calls per lookup.
+    doc = x.doc
+    objid = x.objid
+    cache = getattr(doc, "_cached_objs", None)
+    if cache is not None and objid in cache:
+        obj, _ = cache[objid]
+        # Handle chained refs (rare but possible)
+        while isinstance(obj, PDFObjRef):
+            inner_cache = getattr(obj.doc, "_cached_objs", None)
+            if inner_cache is not None and obj.objid in inner_cache:
+                obj, _ = inner_cache[obj.objid]
+            else:
+                obj = obj.resolve(default=default)
+                if not isinstance(obj, PDFObjRef):
+                    break
+        return obj
+    # Uncached: full resolve path
     x = x.resolve(default=default)
-    # Handle chained references (rare but possible)
     while isinstance(x, PDFObjRef):
         x = x.resolve(default=default)
     return x
