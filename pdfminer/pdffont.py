@@ -152,7 +152,8 @@ class Type1FontHeaderParser(PSStackParser[int]):
             try:
                 self._cid2unicode[cid] = name2unicode(cast(str, name))
             except KeyError as e:
-                log.debug(str(e))
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(str(e))
         return self._cid2unicode
 
     def do_keyword(self, pos: int, token: PSKeyword) -> None:
@@ -790,13 +791,15 @@ class TrueTypeFont:
     def parse_cmap_format_0(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 0"""
         fmtlen, fmtlang = struct.unpack(">HH", fp.read(4))
-        log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
         char2gid.update(enumerate(struct.unpack(">256B", fp.read(256))))
 
     def parse_cmap_format_2(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 2"""
         fmtlen, fmtlang = struct.unpack(">HH", fp.read(4))
-        log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
         subheaderkeys = struct.unpack(">256H", fp.read(512))
         firstbytes = [0] * 8192
         for i, k in enumerate(subheaderkeys):
@@ -820,7 +823,8 @@ class TrueTypeFont:
     def parse_cmap_format_4(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 4"""
         fmtlen, fmtlang = struct.unpack(">HH", fp.read(4))
-        log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
         (segcount, _1, _2, _3) = struct.unpack(">HHHH", fp.read(8))
         segcount //= 2
         ecs = struct.unpack(f">{segcount}H", fp.read(2 * segcount))
@@ -842,7 +846,8 @@ class TrueTypeFont:
     def parse_cmap_format_6(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 6"""
         fmtlen, fmtlang = struct.unpack(">HH", fp.read(4))
-        log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("parse_cmap_format: fmtlen=%s, fmtlang=%s", fmtlen, fmtlang)
         firstcode, entcount = struct.unpack(">HH", fp.read(4))
         gids = struct.unpack(f">{entcount}H", fp.read(2 * entcount))
         for i in range(entcount):
@@ -851,9 +856,10 @@ class TrueTypeFont:
     def parse_cmap_format_10(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 10"""
         rsv, fmtlen, fmtlang = struct.unpack(">HII", fp.read(10))
-        log.debug(
-            "parse_cmap_format: rsv=%s, fmtlen=%s, fmtlang=%s", rsv, fmtlen, fmtlang
-        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "parse_cmap_format: rsv=%s, fmtlen=%s, fmtlang=%s", rsv, fmtlen, fmtlang
+            )
         startcode, numchars = struct.unpack(">II", fp.read(8))
         gids = struct.unpack(f">{numchars}H", fp.read(2 * numchars))
         for i in range(numchars):
@@ -862,9 +868,10 @@ class TrueTypeFont:
     def parse_cmap_format_12(self, fp: BinaryIO, char2gid: dict[int, int]) -> None:
         """Parse cmap subtable format 12"""
         rsv, fmtlen, fmtlang = struct.unpack(">HII", fp.read(10))
-        log.debug(
-            "parse_cmap_format: rsv=%s, fmtlen=%s, fmtlang=%s", rsv, fmtlen, fmtlang
-        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "parse_cmap_format: rsv=%s, fmtlen=%s, fmtlang=%s", rsv, fmtlen, fmtlang
+            )
         numgroups = struct.unpack(">I", fp.read(4))[0]
         for _i in range(numgroups):
             sc, ec, sgid = struct.unpack(">III", fp.read(12))

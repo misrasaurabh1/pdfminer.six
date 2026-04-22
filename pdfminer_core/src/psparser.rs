@@ -427,11 +427,39 @@ fn parse_literal_string(data: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
 
 // ─── PyO3 bridge ─────────────────────────────────────────────────────────────
 
-/// Python-callable: tokenize a bytes buffer and return
-/// `(list_of_(pos, type_int, value), bytes_consumed)`.
+/// Convert a `PsToken` to a Python value.
 ///
-/// `value` is always `bytes` on the Python side; the Python wrapper converts
-/// integers/floats/booleans from their bytes representation.
+/// - `Integer`, `Float`, `Bool`, `Bytes`, `HexString` → native Python objects
+/// - `Literal` → `(3, name_bytes)` tuple  (caller must call `LIT()`)
+/// - `Keyword` → `(4, kw_bytes)` tuple    (caller must call `KWD()`)
+#[inline]
+fn token_to_pyobject(py: Python<'_>, tok: PsToken) -> PyResult<PyObject> {
+    match tok {
+        PsToken::Integer(v) => Ok(v.to_object(py)),
+        PsToken::Float(v) => Ok(v.to_object(py)),
+        PsToken::Bool(b) => Ok(b.to_object(py)),
+        PsToken::Bytes(v) => Ok(PyBytes::new_bound(py, &v).into()),
+        PsToken::HexString(v) => Ok(PyBytes::new_bound(py, &v).into()),
+        PsToken::Literal(v) => {
+            let type_obj: PyObject = 3u8.to_object(py);
+            let val_obj: PyObject = PyBytes::new_bound(py, &v).into();
+            Ok(PyTuple::new_bound(py, [type_obj, val_obj]).into())
+        }
+        PsToken::Keyword(v) => {
+            let type_obj: PyObject = 4u8.to_object(py);
+            let val_obj: PyObject = PyBytes::new_bound(py, &v).into();
+            Ok(PyTuple::new_bound(py, [type_obj, val_obj]).into())
+        }
+    }
+}
+
+/// Python-callable: tokenize a bytes buffer and return
+/// `(list_of_(pos, value), bytes_consumed)`.
+///
+/// Each element is a 2-tuple `(position, value)` where `value` is:
+/// - a native Python `int`, `float`, `bool`, or `bytes` for those token types
+/// - a `(3, name_bytes)` tuple for PS literals (caller must call `LIT()`)
+/// - a `(4, kw_bytes)` tuple for PS keywords (caller must call `KWD()`)
 #[pyfunction]
 pub fn tokenize_ps_buffer(
     py: Python<'_>,
@@ -442,25 +470,9 @@ pub fn tokenize_ps_buffer(
 
     let py_list = PyList::empty_bound(py);
     for (pos, tok) in tok_list {
-        let (type_int, value_obj): (u8, PyObject) = match tok {
-            PsToken::Integer(v) => {
-                let s = format!("{}", v);
-                (0, PyBytes::new_bound(py, s.as_bytes()).into())
-            }
-            PsToken::Float(v) => {
-                let s = format!("{}", v);
-                (1, PyBytes::new_bound(py, s.as_bytes()).into())
-            }
-            PsToken::Bytes(v) => (2, PyBytes::new_bound(py, &v).into()),
-            PsToken::Literal(v) => (3, PyBytes::new_bound(py, &v).into()),
-            PsToken::Keyword(v) => (4, PyBytes::new_bound(py, &v).into()),
-            PsToken::HexString(v) => (5, PyBytes::new_bound(py, &v).into()),
-            PsToken::Bool(true) => (6, PyBytes::new_bound(py, b"true").into()),
-            PsToken::Bool(false) => (7, PyBytes::new_bound(py, b"false").into()),
-        };
         let pos_obj: PyObject = pos.to_object(py);
-        let type_obj: PyObject = type_int.to_object(py);
-        let tup = PyTuple::new_bound(py, [pos_obj, type_obj, value_obj]);
+        let val_obj = token_to_pyobject(py, tok)?;
+        let tup = PyTuple::new_bound(py, [pos_obj, val_obj]);
         py_list.append(tup)?;
     }
 
@@ -473,9 +485,9 @@ pub fn tokenize_ps_buffer(
 /// processes the whole input in one shot.  Because we have the complete data,
 /// there are no partial-token boundary concerns.
 ///
-/// Returns a list of `(position, type_int, value_bytes)` tuples using the same
-/// type constants as `tokenize_ps_buffer`.  The caller converts to Python objects
-/// using the existing `_convert_rust_tokens` helper.
+/// Returns a list of `(position, value)` 2-tuples using the same format as
+/// `tokenize_ps_buffer`.  The caller converts literals/keywords using
+/// `_convert_rust_tokens`.
 #[pyfunction]
 pub fn tokenize_full_stream(
     py: Python<'_>,
@@ -495,20 +507,9 @@ pub fn tokenize_full_stream(
 
     let py_list = PyList::empty_bound(py);
     for (pos, tok) in all_tokens {
-        let (type_int, value_bytes): (u8, Vec<u8>) = match tok {
-            PsToken::Integer(v) => (0, format!("{}", v).into_bytes()),
-            PsToken::Float(v) => (1, format!("{}", v).into_bytes()),
-            PsToken::Bytes(v) => (2, v),
-            PsToken::Literal(v) => (3, v),
-            PsToken::Keyword(v) => (4, v),
-            PsToken::HexString(v) => (5, v),
-            PsToken::Bool(true) => (6, b"true".to_vec()),
-            PsToken::Bool(false) => (7, b"false".to_vec()),
-        };
         let pos_obj: PyObject = pos.to_object(py);
-        let type_obj: PyObject = type_int.to_object(py);
-        let val_obj: PyObject = PyBytes::new_bound(py, &value_bytes).into();
-        let tup = PyTuple::new_bound(py, [pos_obj, type_obj, val_obj]);
+        let val_obj = token_to_pyobject(py, tok)?;
+        let tup = PyTuple::new_bound(py, [pos_obj, val_obj]);
         py_list.append(tup)?;
     }
 

@@ -33,10 +33,12 @@ from pdfminer.psexceptions import PSEOF, PSTypeError
 from pdfminer.psparser import (
     KWD,
     LIT,
+    PSBaseParserToken,
     PSKeyword,
     PSLiteral,
     PSStackParser,
     PSStackType,
+    _RUST_TOK_KEYWORD,
     _convert_rust_tokens,
     keyword_name,
     literal_name,
@@ -59,10 +61,14 @@ try:
     _rust_apply_text_advance = _pdfminer_core.apply_text_advance
     _rust_mult_matrix = _pdfminer_core.mult_matrix
     _rust_tokenize_full_stream = getattr(_pdfminer_core, "tokenize_full_stream", None)
+    _rust_split_ops_and_operands = getattr(
+        _pdfminer_core, "split_ops_and_operands", None
+    )
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
     _rust_tokenize_full_stream = None
+    _rust_split_ops_and_operands = None
 
 
 def _text_advance(
@@ -73,6 +79,13 @@ def _text_advance(
         return _rust_apply_text_advance(matrix, tx, ty)
     a, b, c, d, e, f = matrix
     return tx * a + ty * c + e, tx * b + ty * d + f
+
+
+def _kw_to_method(name: str) -> str:
+    """Convert a PDF operator name to the corresponding do_* method name."""
+    return "do_{}".format(
+        name.replace("*", "_a").replace('"', "_w").replace("'", "_q")
+    )
 
 
 class PDFResourceError(PDFException):
@@ -301,20 +314,39 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                     stream_value(obj).get_data() for obj in streams
                 )
                 raw_tokens = _rust_tokenize_full_stream(combined)
-                # _RUST_TOK_KEYWORD == 4; BI starts an inline image block whose
-                # raw binary data must be read via get_inline_data(), not via
-                # the pre-tokenized list.
+                # Keywords are encoded as (_RUST_TOK_KEYWORD, bytes) tuples;
+                # BI starts an inline image block whose raw binary data must
+                # be read via get_inline_data(), not via the pre-tokenized list.
                 has_inline_image = any(
-                    ttype == 4 and val == b"BI" for _, ttype, val in raw_tokens
+                    isinstance(val, tuple) and val == (_RUST_TOK_KEYWORD, b"BI")
+                    for _, val in raw_tokens
                 )
                 if not has_inline_image:
                     self.fp = BytesIO(combined)
-                    self._tokens.extend(_convert_rust_tokens(raw_tokens))
+                    # Store tokens in a plain list and use an index counter for
+                    # O(1) access — avoids O(n) list.pop(0) per token.
+                    self._pretokenized_list: list[
+                        tuple[int, "PSBaseParserToken"]
+                    ] = _convert_rust_tokens(raw_tokens)
+                    self._pretokenized_pos: int = 0
                     self._rust_pretokenized = True
             except Exception:
                 self._rust_pretokenized = False
                 self.fp = None  # type: ignore[assignment]
                 self.istream = 0
+
+    def nexttoken(self) -> tuple[int, PSBaseParserToken]:
+        """Return the next token, using O(1) index access when pre-tokenized."""
+        if self._rust_pretokenized:
+            pos = self._pretokenized_pos
+            if pos < len(self._pretokenized_list):
+                self._pretokenized_pos = pos + 1
+                tok = self._pretokenized_list[pos]
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("nexttoken: %r", tok)
+                return tok
+            raise PSEOF("Unexpected EOF")
+        return super().nexttoken()
 
     def fillfp(self) -> bool:
         if not self.fp:
@@ -329,32 +361,21 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
 
     def seek(self, pos: int) -> None:
         self.fillfp()
-        if self._rust_pretokenized:
-            # PSBaseParser.seek() resets self._tokens; preserve them so the
-            # pre-built token list survives seek() calls from get_inline_data().
-            saved_tokens = self._tokens
-            PSStackParser.seek(self, pos)
-            self._tokens = saved_tokens
-        else:
-            PSStackParser.seek(self, pos)
+        PSStackParser.seek(self, pos)
 
     def fillbuf(self) -> bool:
         if self._rust_pretokenized:
             if self.charpos < len(self.buf):
                 return False
-            # nexttoken() calls fillbuf() only when self._tokens is empty.
-            # If tokens are already exhausted there is nothing left to parse.
-            # If tokens are still queued, this call came from get_inline_data()
-            # after a seek() — read raw bytes from fp to serve that path.
-            if not self._tokens:
-                raise PSEOF("Unexpected EOF")
+            # This path is only reached from get_inline_data() after a seek().
+            # Read raw bytes from fp to serve that path.
             if self.fp is not None:
                 self.bufpos = self.fp.tell()
                 self.buf = self.fp.read(self.BUFSIZ)
                 if self.buf:
                     self.charpos = 0
                     return False
-            return False
+            raise PSEOF("Unexpected EOF")
         if self.charpos < len(self.buf):
             return False
         new_stream = False
@@ -1497,6 +1518,45 @@ class PDFPageInterpreter:
         except PSEOF:
             # empty page
             return
+
+        # Fast path: pre-collect all parsed objects (respecting array/dict
+        # construction in PSStackParser) and split them in Rust to eliminate
+        # the per-token argstack.append() / pop() overhead from the hot loop.
+        if _HAS_RUST and _rust_split_ops_and_operands is not None:
+            parsed: list[tuple[int, object]] = []
+            while True:
+                try:
+                    parsed.append(parser.nextobject())
+                except PSEOF:
+                    break
+            for operands, kw_bytes in _rust_split_ops_and_operands(parsed, PSKeyword):
+                if kw_bytes is None:
+                    # Trailing operands without an operator — push onto stack.
+                    self.argstack.extend(operands)
+                    continue
+                name = kw_bytes.decode("latin-1")
+                method = _kw_to_method(name)
+                if hasattr(self, method):
+                    func = getattr(self, method)
+                    nargs = func.__code__.co_argcount - 1
+                    if nargs:
+                        if log.isEnabledFor(logging.DEBUG):
+                            log.debug("exec: %s %r", name, operands)
+                        if len(operands) == nargs:
+                            func(*operands)
+                    else:
+                        # Zero declared args: operator uses self.pop() internally
+                        # (e.g. do_SCN, do_scn).  Push operands so pop() finds them.
+                        self.argstack.extend(operands)
+                        if log.isEnabledFor(logging.DEBUG):
+                            log.debug("exec: %s", name)
+                        func()
+                elif settings.STRICT:
+                    error_msg = f"Unknown operator: {name!r}"
+                    raise PDFInterpreterError(error_msg)
+            return
+
+        # Pure-Python fallback (no Rust extension available).
         while True:
             try:
                 (_, obj) = parser.nextobject()
@@ -1504,14 +1564,7 @@ class PDFPageInterpreter:
                 break
             if isinstance(obj, PSKeyword):
                 name = keyword_name(obj)
-                method = "do_{}".format(
-                    name.replace("*", "_a")
-                    .replace('"', "_w")
-                    .replace(
-                        "'",
-                        "_q",
-                    )
-                )
+                method = _kw_to_method(name)
                 if hasattr(self, method):
                     func = getattr(self, method)
                     nargs = func.__code__.co_argcount - 1

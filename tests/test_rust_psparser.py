@@ -79,94 +79,99 @@ class TestRustTokenizerDirect:
             pytest.skip("pdfminer_core not built")
         tokens, consumed = tokenize_ps_buffer(b"42 ", 0)
         assert len(tokens) == 1
-        pos, ttype, val = tokens[0]
+        pos, val = tokens[0]
         assert pos == 0
-        assert ttype == 0  # integer
-        assert val == b"42"
+        assert val == 42  # native Python int
         assert consumed == 3
 
     def test_negative_integer(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"-7 ", 0)
-        assert tokens[0][1] == 0
-        assert tokens[0][2] == b"-7"
+        pos, val = tokens[0]
+        assert val == -7
 
     def test_float(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"3.14 ", 0)
-        assert tokens[0][1] == 1
-        assert tokens[0][2] == b"3.14"
+        pos, val = tokens[0]
+        assert isinstance(val, float)
+        assert val == pytest.approx(3.14)
 
     def test_float_leading_dot(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b".5 ", 0)
-        assert tokens[0][1] == 1
-        # Rust serialises 0.5_f64 as "0.5"; the value is what matters.
-        assert float(tokens[0][2]) == pytest.approx(0.5)
+        pos, val = tokens[0]
+        assert isinstance(val, float)
+        assert val == pytest.approx(0.5)
 
     def test_keyword(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"BT ", 0)
-        assert tokens[0][1] == 4
-        assert tokens[0][2] == b"BT"
+        pos, val = tokens[0]
+        # Keywords are encoded as (4, bytes) tuples
+        assert val == (4, b"BT")
 
     def test_boolean_true(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"true ", 0)
-        assert tokens[0][1] == 6
+        pos, val = tokens[0]
+        assert val is True
 
     def test_boolean_false(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"false ", 0)
-        assert tokens[0][1] == 7
+        pos, val = tokens[0]
+        assert val is False
 
     def test_literal(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"/Name ", 0)
-        assert tokens[0][1] == 3
-        assert tokens[0][2] == b"Name"
+        pos, val = tokens[0]
+        # Literals are encoded as (3, bytes) tuples
+        assert val == (3, b"Name")
 
     def test_string(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"(hello) ", 0)
-        assert tokens[0][1] == 2
-        assert tokens[0][2] == b"hello"
+        pos, val = tokens[0]
+        assert val == b"hello"  # native Python bytes
 
     def test_hexstring(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"<48656c6c6f> ", 0)
-        assert tokens[0][1] == 5
-        assert tokens[0][2] == b"Hello"
+        pos, val = tokens[0]
+        assert val == b"Hello"  # native Python bytes
 
     def test_dict_begin(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"<< ", 0)
-        assert tokens[0][1] == 4
-        assert tokens[0][2] == b"<<"
+        pos, val = tokens[0]
+        assert val == (4, b"<<")
 
     def test_dict_end(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b">> ", 0)
-        assert tokens[0][1] == 4
-        assert tokens[0][2] == b">>"
+        pos, val = tokens[0]
+        assert val == (4, b">>")
 
     def test_comment_skipped(self) -> None:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"% comment\n42 ", 0)
         assert len(tokens) == 1
-        assert tokens[0][2] == b"42"
+        pos, val = tokens[0]
+        assert val == 42
 
     def test_base_offset(self) -> None:
         if not _RUST_AVAILABLE:
@@ -195,8 +200,8 @@ class TestRustTokenizerDirect:
         if not _RUST_AVAILABLE:
             pytest.skip("pdfminer_core not built")
         tokens, _ = tokenize_ps_buffer(b"/foo#5fbar ", 0)
-        assert tokens[0][1] == 3
-        assert tokens[0][2] == b"foo_bar"  # #5f == '_'
+        pos, val = tokens[0]
+        assert val == (3, b"foo_bar")  # #5f == '_', encoded as (3, bytes)
 
 
 # ---------------------------------------------------------------------------

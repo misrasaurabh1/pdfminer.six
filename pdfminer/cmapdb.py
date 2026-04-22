@@ -266,7 +266,8 @@ class CMapDB:
     @classmethod
     def _load_data(cls, name: str) -> type[Any]:
         name = name.replace("\0", "")
-        log.debug("loading: %r", name)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("loading: %r", name)
         cmap_paths = (
             os.environ.get("CMAP_PATH", "/usr/share/pdfminer/"),
             os.path.join(os.path.dirname(__file__), "cmap"),
@@ -283,7 +284,8 @@ class CMapDB:
             if resolved_json_path.startswith(
                 resolved_directory + os.sep
             ) and os.path.exists(resolved_json_path):
-                log.debug("loading JSON: %r", json_path)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("loading JSON: %r", json_path)
                 with gzip.open(resolved_json_path, "rt", encoding="utf-8") as gzfile:
                     data: dict[str, Any] = json.load(gzfile)
                     # Convert string keys to integers for CID mappings

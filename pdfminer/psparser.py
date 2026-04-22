@@ -24,15 +24,11 @@ try:
 except ImportError:
     _HAS_RUST = False
 
-# Token-type constants returned by the Rust tokenizer
-_RUST_TOK_INT = 0
-_RUST_TOK_FLOAT = 1
-_RUST_TOK_STRING = 2
+# Token-type constants for Literal/Keyword markers returned by the Rust tokenizer.
+# int/float/bool/bytes are returned as native Python objects; only these two
+# types still need Python-side interning via LIT()/KWD().
 _RUST_TOK_LITERAL = 3
 _RUST_TOK_KEYWORD = 4
-_RUST_TOK_HEXSTRING = 5
-_RUST_TOK_TRUE = 6
-_RUST_TOK_FALSE = 7
 
 
 # Adding aliases for these exceptions for backwards compatibility
@@ -176,40 +172,30 @@ PSBaseParserToken = Union[float, bool, PSLiteral, PSKeyword, bytes]
 
 
 def _convert_rust_tokens(
-    raw: list[tuple[int, int, bytes]],
+    raw: list[tuple[int, Any]],
 ) -> list[tuple[int, PSBaseParserToken]]:
-    """Convert the Rust tokenizer's raw output to Python PSBaseParserToken tuples.
+    """Convert the Rust tokenizer's output to Python PSBaseParserToken tuples.
 
-    Each raw item is ``(position, type_int, value_bytes)`` where type_int is one
-    of the ``_RUST_TOK_*`` constants defined at module level.
+    Each raw item is a 2-tuple ``(position, value)`` where ``value`` is:
+
+    - a native Python ``int``, ``float``, ``bool``, or ``bytes`` — used as-is
+    - a ``(_RUST_TOK_LITERAL, name_bytes)`` tuple — converted via ``LIT()``
+    - a ``(_RUST_TOK_KEYWORD, kw_bytes)`` tuple — converted via ``KWD()``
     """
     result: list[tuple[int, PSBaseParserToken]] = []
-    for pos, ttype, value in raw:
-        token: PSBaseParserToken
-        if ttype == _RUST_TOK_INT:
-            with contextlib.suppress(ValueError):
-                token = int(value)
-                result.append((pos, token))
-        elif ttype == _RUST_TOK_FLOAT:
-            with contextlib.suppress(ValueError):
-                token = float(value)
-                result.append((pos, token))
-        elif ttype == _RUST_TOK_STRING:
+    for pos, value in raw:
+        if isinstance(value, tuple):
+            ttype, raw_bytes = value
+            if ttype == _RUST_TOK_LITERAL:
+                try:
+                    name: str | bytes = str(raw_bytes, "utf-8")
+                except Exception:
+                    name = raw_bytes
+                result.append((pos, LIT(name)))
+            else:
+                result.append((pos, KWD(raw_bytes)))
+        else:
             result.append((pos, value))
-        elif ttype == _RUST_TOK_LITERAL:
-            try:
-                name: str | bytes = str(value, "utf-8")
-            except Exception:
-                name = value
-            result.append((pos, LIT(name)))
-        elif ttype == _RUST_TOK_KEYWORD:
-            result.append((pos, KWD(value)))
-        elif ttype == _RUST_TOK_HEXSTRING:
-            result.append((pos, value))
-        elif ttype == _RUST_TOK_TRUE:
-            result.append((pos, True))
-        elif ttype == _RUST_TOK_FALSE:
-            result.append((pos, False))
     return result
 
 

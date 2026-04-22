@@ -1,4 +1,69 @@
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyList, PyTuple};
+
+/// Split a flat list of `(pos, token)` pairs into `(operands, operator)` groups.
+///
+/// The input is the already-converted Python token list produced by
+/// `PDFContentParser` / `_convert_rust_tokens`.  Each element is a 2-tuple
+/// `(int_pos, token_object)`.
+///
+/// Tokens that are `PSKeyword` instances (identified by the Python-side
+/// `PSKeyword` class) mark the end of an operand group and start the next.
+/// All preceding non-keyword tokens become that operation's operand list.
+///
+/// Returns a `list` of `(operands, keyword_bytes_or_None)` pairs where:
+/// - `operands` is a Python `list` of the accumulated operand objects.
+/// - `keyword_bytes_or_None` is `bytes` (the raw keyword name) for a complete
+///   operation, or `None` for any trailing operands without a following keyword.
+///
+/// Splitting in Rust removes the per-token `argstack.append()` / `pop()` calls
+/// from the Python `execute()` hot loop, which is the dominant overhead there.
+#[pyfunction]
+#[pyo3(signature = (tokens, ps_keyword_class))]
+pub fn split_ops_and_operands(
+    py: Python<'_>,
+    tokens: &Bound<'_, PyList>,
+    ps_keyword_class: &Bound<'_, PyAny>,
+) -> PyResult<PyObject> {
+    let result = PyList::empty_bound(py);
+    let mut operands: Vec<PyObject> = Vec::new();
+
+    for item in tokens.iter() {
+        // Each item is a 2-tuple (pos, token).
+        let tup = item.downcast::<PyTuple>()?;
+        // Index 1 is the token object.
+        let token = tup.get_item(1)?;
+        // Check if this token is a PSKeyword instance.
+        if token.is_instance(ps_keyword_class)? {
+            // Get the raw keyword bytes via its `.name` attribute.
+            let name_attr = token.getattr("name")?;
+            let kw_bytes: Vec<u8> = if let Ok(b) = name_attr.downcast::<PyBytes>() {
+                b.as_bytes().to_vec()
+            } else {
+                // name might be str (for keywords stored as str)
+                let s: String = name_attr.extract()?;
+                s.into_bytes()
+            };
+            let py_ops = PyList::new_bound(py, operands.iter().map(|o| o.bind(py)));
+            let kw_obj: PyObject = PyBytes::new_bound(py, &kw_bytes).into();
+            let pair = PyTuple::new_bound(py, [py_ops.into_any(), kw_obj.into_bound(py)]);
+            result.append(pair)?;
+            operands = Vec::new();
+        } else {
+            operands.push(token.into());
+        }
+    }
+
+    // Any trailing operands without a keyword.
+    if !operands.is_empty() {
+        let py_ops = PyList::new_bound(py, operands.iter().map(|o| o.bind(py)));
+        let none_obj = py.None().into_bound(py);
+        let pair = PyTuple::new_bound(py, [py_ops.into_any(), none_obj]);
+        result.append(pair)?;
+    }
+
+    Ok(result.into())
+}
 
 /// Apply a spacing adjustment for a TJ array element.
 ///
@@ -139,5 +204,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(text_state_to_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(mult_matrix_rust, m)?)?;
     m.add_function(wrap_pyfunction!(apply_text_advance, m)?)?;
+    m.add_function(wrap_pyfunction!(split_ops_and_operands, m)?)?;
     Ok(())
 }
