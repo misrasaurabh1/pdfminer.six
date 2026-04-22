@@ -90,42 +90,53 @@ class PDFPage:
     @classmethod
     def create_pages(cls, document: PDFDocument) -> Iterator["PDFPage"]:
         def depth_first_search(
-            obj: Any,
-            parent: dict[str, Any],
-            visited: set[Any] | None = None,
-        ) -> Iterator[tuple[int, dict[Any, dict[Any, Any]]]]:
-            if isinstance(obj, int):
-                object_id = obj
-                object_properties = dict_value(document.getobj(object_id)).copy()
-            else:
-                # This looks broken. obj.objid means obj could be either
-                # PDFObjRef or PDFStream, but neither is valid for dict_value.
-                object_id = obj.objid  # type: ignore[attr-defined]
-                object_properties = dict_value(obj).copy()
+            root: Any,
+            root_parent: dict[str, Any],
+        ) -> Iterator[tuple[int, dict[Any, Any]]]:
+            """Iterative DFS over the PDF page tree.
 
-            # Avoid recursion errors by keeping track of visited nodes
-            if visited is None:
-                visited = set()
-            if object_id in visited:
-                return
-            visited.add(object_id)
+            Uses an explicit stack to avoid Python recursion limits on
+            deeply-nested page trees.  Each stack frame carries the node
+            reference and the *inherited* attribute dict from its parent.
+            """
+            visited: set[Any] = set()
 
-            for k, v in parent.items():
-                if k in cls.INHERITABLE_ATTRS and k not in object_properties:
-                    object_properties[k] = v
+            # Stack entries: (obj_ref, parent_attrs)
+            stack: list[tuple[Any, dict[str, Any]]] = [(root, root_parent)]
 
-            object_type = object_properties.get("Type")
-            if object_type is None and not settings.STRICT:  # See #64
-                object_type = object_properties.get("type")
+            while stack:
+                obj, parent = stack.pop()
 
-            if object_type is LITERAL_PAGES and "Kids" in object_properties:
-                log.debug("Pages: Kids=%r", object_properties["Kids"])
-                for child in list_value(object_properties["Kids"]):
-                    yield from depth_first_search(child, object_properties, visited)
+                if isinstance(obj, int):
+                    object_id = obj
+                    object_properties = dict_value(
+                        document.getobj(object_id)
+                    ).copy()
+                else:
+                    object_id = obj.objid  # type: ignore[attr-defined]
+                    object_properties = dict_value(obj).copy()
 
-            elif object_type is LITERAL_PAGE:
-                log.debug("Page: %r", object_properties)
-                yield (object_id, object_properties)
+                if object_id in visited:
+                    continue
+                visited.add(object_id)
+
+                for k, v in parent.items():
+                    if k in cls.INHERITABLE_ATTRS and k not in object_properties:
+                        object_properties[k] = v
+
+                object_type = object_properties.get("Type")
+                if object_type is None and not settings.STRICT:  # See #64
+                    object_type = object_properties.get("type")
+
+                if object_type is LITERAL_PAGES and "Kids" in object_properties:
+                    log.debug("Pages: Kids=%r", object_properties["Kids"])
+                    kids = list_value(object_properties["Kids"])
+                    for child in reversed(kids):
+                        stack.append((child, object_properties))
+
+                elif object_type is LITERAL_PAGE:
+                    log.debug("Page: %r", object_properties)
+                    yield (object_id, object_properties)
 
         try:
             page_labels: Iterator[str | None] = document.get_page_labels()
@@ -134,7 +145,9 @@ class PDFPage:
 
         pages = False
         if "Pages" in document.catalog:
-            objects = depth_first_search(document.catalog["Pages"], document.catalog)
+            objects = depth_first_search(
+                document.catalog["Pages"], document.catalog
+            )
             for objid, tree in objects:
                 yield cls(document, objid, tree, next(page_labels))
                 pages = True

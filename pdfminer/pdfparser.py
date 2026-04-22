@@ -9,6 +9,15 @@ from pdfminer.pdftypes import PDFObjRef, PDFStream, dict_value, int_value
 from pdfminer.psexceptions import PSEOF
 from pdfminer.psparser import KWD, PSKeyword, PSStackParser
 
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        resolve_stream_length as _resolve_stream_length_rust,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 if TYPE_CHECKING:
     from pdfminer.pdfdocument import PDFDocument
 
@@ -87,7 +96,14 @@ class PDFParser(PSStackParser[Union[PSKeyword, PDFStream, PDFObjRef, None]]):
             objlen = 0
             if not self.fallback:
                 try:
-                    objlen = int_value(dic["Length"])
+                    # Fast path: skip resolve1/int_value when /Length is a plain int.
+                    if _HAS_RUST:
+                        rust_len = _resolve_stream_length_rust(dic)
+                        objlen = rust_len if rust_len is not None else int_value(
+                            dic["Length"]
+                        )
+                    else:
+                        objlen = int_value(dic["Length"])
                 except KeyError as err:
                     if settings.STRICT:
                         raise PDFSyntaxError(f"/Length is undefined: {dic!r}") from err

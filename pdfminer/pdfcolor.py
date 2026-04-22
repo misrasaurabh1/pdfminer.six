@@ -34,3 +34,8 @@ for name, n in [
     ("Pattern", 1),
 ]:
     PREDEFINED_COLORSPACE[name] = PDFColorSpace(name, n)
+
+
+def get_colorspace(name: str) -> "PDFColorSpace | None":
+    """Return a cached predefined colorspace by name, or None if unknown."""
+    return PREDEFINED_COLORSPACE.get(name)
