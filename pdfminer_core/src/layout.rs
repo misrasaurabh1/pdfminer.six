@@ -207,10 +207,147 @@ pub fn group_chars_into_lines(
     groups
 }
 
+/// Group text lines into text boxes using spatial neighbor search.
+///
+/// Each line is represented as (x0, y0, x1, y1, is_horizontal).
+/// Returns groups of line indices — each group forms one text box.
+///
+/// Replicates the logic of LTLayoutContainer.group_textlines():
+///   - For each line, find neighbors within line_margin * height (horizontal)
+///     or line_margin * width (vertical) using the spatial index.
+///   - Alignment check: same height/width within d tolerance, and left-, right-
+///     or centre-aligned within d tolerance.
+///   - Union-find merges overlapping neighbor sets into boxes.
+#[pyfunction]
+pub fn group_textlines_fast(
+    line_bboxes: Vec<(f64, f64, f64, f64, bool)>, // (x0,y0,x1,y1,is_horizontal)
+    line_margin: f64,
+    gridsize: f64,
+    page_bbox: (f64, f64, f64, f64),
+) -> Vec<Vec<usize>> {
+    let n = line_bboxes.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    // Build spatial index
+    let mut plane = Plane::new(page_bbox, gridsize);
+    for (i, &(x0, y0, x1, y1, _)) in line_bboxes.iter().enumerate() {
+        plane.add_bbox(i, (x0, y0, x1, y1));
+    }
+
+    // Union-find
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]]; // path compression
+            x = parent[x];
+        }
+        x
+    }
+
+    fn union(parent: &mut Vec<usize>, a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+
+    for (i, &(x0, y0, x1, y1, is_horiz)) in line_bboxes.iter().enumerate() {
+        let (query, d) = if is_horiz {
+            let d = line_margin * (y1 - y0);
+            ((x0, y0 - d, x1, y1 + d), d)
+        } else {
+            let d = line_margin * (x1 - x0);
+            ((x0 - d, y0, x1 + d, y1), d)
+        };
+
+        for j in plane.find_overlapping(query) {
+            if j == i {
+                continue;
+            }
+            let (ox0, oy0, ox1, oy1, o_horiz) = line_bboxes[j];
+            if o_horiz != is_horiz {
+                continue;
+            }
+            // Alignment check (mirrors Python find_neighbors)
+            if is_horiz {
+                let h_self = y1 - y0;
+                let h_other = oy1 - oy0;
+                // same height
+                if (h_other - h_self).abs() > d {
+                    continue;
+                }
+                // left-, right-, or centre-aligned
+                let left_ok = (ox0 - x0).abs() <= d;
+                let right_ok = (ox1 - x1).abs() <= d;
+                let center_ok = ((ox0 + ox1) / 2.0 - (x0 + x1) / 2.0).abs() <= d;
+                if !left_ok && !right_ok && !center_ok {
+                    continue;
+                }
+            } else {
+                let w_self = x1 - x0;
+                let w_other = ox1 - ox0;
+                if (w_other - w_self).abs() > d {
+                    continue;
+                }
+                let top_ok = (oy1 - y1).abs() <= d;
+                let bot_ok = (oy0 - y0).abs() <= d;
+                let center_ok = ((oy0 + oy1) / 2.0 - (y0 + y1) / 2.0).abs() <= d;
+                if !top_ok && !bot_ok && !center_ok {
+                    continue;
+                }
+            }
+            union(&mut parent, i, j);
+        }
+    }
+
+    // Collect groups by root
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    groups.into_values().collect()
+}
+
+/// Compute pairwise bounding-box distances for group_textboxes.
+///
+/// dist(a, b) = area(bounding_rect(a, b)) - area(a) - area(b)
+/// Returns a Vec of (dist, i, j) for all i < j pairs.
+#[pyfunction]
+pub fn compute_textbox_distances(
+    bboxes: Vec<(f64, f64, f64, f64)>,
+) -> Vec<(f64, usize, usize)> {
+    let n = bboxes.len();
+    let mut dists = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        let (ax0, ay0, ax1, ay1) = bboxes[i];
+        let aw = ax1 - ax0;
+        let ah = ay1 - ay0;
+        for j in (i + 1)..n {
+            let (bx0, by0, bx1, by1) = bboxes[j];
+            let bw = bx1 - bx0;
+            let bh = by1 - by0;
+            let x0 = ax0.min(bx0);
+            let y0 = ay0.min(by0);
+            let x1 = ax1.max(bx1);
+            let y1 = ay1.max(by1);
+            let d = (x1 - x0) * (y1 - y0) - aw * ah - bw * bh;
+            dists.push((d, i, j));
+        }
+    }
+    dists
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Plane>()?;
     m.add_function(wrap_pyfunction!(bbox_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(bbox_overlap_area, m)?)?;
     m.add_function(wrap_pyfunction!(group_chars_into_lines, m)?)?;
+    m.add_function(wrap_pyfunction!(group_textlines_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_textbox_distances, m)?)?;
     Ok(())
 }

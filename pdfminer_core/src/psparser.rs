@@ -467,7 +467,56 @@ pub fn tokenize_ps_buffer(
     Ok((py_list.into(), consumed))
 }
 
+/// Tokenize an entire content stream at once, returning all tokens.
+///
+/// Unlike `tokenize_ps_buffer` which stops at buffer boundaries, this function
+/// processes the whole input in one shot.  Because we have the complete data,
+/// there are no partial-token boundary concerns.
+///
+/// Returns a list of `(position, type_int, value_bytes)` tuples using the same
+/// type constants as `tokenize_ps_buffer`.  The caller converts to Python objects
+/// using the existing `_convert_rust_tokens` helper.
+#[pyfunction]
+pub fn tokenize_full_stream(
+    py: Python<'_>,
+    data: &[u8],
+) -> PyResult<PyObject> {
+    let n = data.len();
+    let (mut all_tokens, consumed) = tokenize_buffer(data, 0);
+
+    // tokenize_buffer stops when a token at the end of the slice lacks a
+    // terminating whitespace.  Appending a newline and re-running flushes it.
+    if consumed < n {
+        let mut tail = data[consumed..].to_vec();
+        tail.push(b'\n');
+        let (extra_tokens, _) = tokenize_buffer(&tail, consumed);
+        all_tokens.extend(extra_tokens);
+    }
+
+    let py_list = PyList::empty_bound(py);
+    for (pos, tok) in all_tokens {
+        let (type_int, value_bytes): (u8, Vec<u8>) = match tok {
+            PsToken::Integer(v) => (0, format!("{}", v).into_bytes()),
+            PsToken::Float(v) => (1, format!("{}", v).into_bytes()),
+            PsToken::Bytes(v) => (2, v),
+            PsToken::Literal(v) => (3, v),
+            PsToken::Keyword(v) => (4, v),
+            PsToken::HexString(v) => (5, v),
+            PsToken::Bool(true) => (6, b"true".to_vec()),
+            PsToken::Bool(false) => (7, b"false".to_vec()),
+        };
+        let pos_obj: PyObject = pos.to_object(py);
+        let type_obj: PyObject = type_int.to_object(py);
+        let val_obj: PyObject = PyBytes::new_bound(py, &value_bytes).into();
+        let tup = PyTuple::new_bound(py, [pos_obj, type_obj, val_obj]);
+        py_list.append(tup)?;
+    }
+
+    Ok(py_list.into())
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize_ps_buffer, m)?)?;
+    m.add_function(wrap_pyfunction!(tokenize_full_stream, m)?)?;
     Ok(())
 }

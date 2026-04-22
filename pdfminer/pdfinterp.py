@@ -37,6 +37,7 @@ from pdfminer.psparser import (
     PSLiteral,
     PSStackParser,
     PSStackType,
+    _convert_rust_tokens,
     keyword_name,
     literal_name,
 )
@@ -57,9 +58,11 @@ try:
 
     _rust_apply_text_advance = _pdfminer_core.apply_text_advance
     _rust_mult_matrix = _pdfminer_core.mult_matrix
+    _rust_tokenize_full_stream = getattr(_pdfminer_core, "tokenize_full_stream", None)
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
+    _rust_tokenize_full_stream = None
 
 
 def _text_advance(
@@ -274,6 +277,8 @@ class PDFResourceManager:
 
 
 class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
+    _rust_pretokenized: bool = False
+
     def __init__(self, streams: Sequence[object]) -> None:
         self.streams = streams
         self.istream = 0
@@ -281,6 +286,32 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
         # all the methods that would attempt to access self.fp without first
         # calling self.fillfp().
         PSStackParser.__init__(self, None)  # type: ignore[arg-type]
+
+        # Pre-tokenize the entire concatenated stream in one Rust call,
+        # eliminating per-buffer FFI overhead and partial-token boundary
+        # handling.  Inline images (BI/ID raw-bytes/EI) contain binary data
+        # that cannot be pre-tokenized, so skip the fast path when "BI" appears
+        # as a keyword token.
+        if _HAS_RUST and _rust_tokenize_full_stream is not None:
+            try:
+                combined = b"".join(
+                    stream_value(obj).get_data() for obj in streams
+                )
+                raw_tokens = _rust_tokenize_full_stream(combined)
+                # _RUST_TOK_KEYWORD == 4; BI starts an inline image block whose
+                # raw binary data must be read via get_inline_data(), not via
+                # the pre-tokenized list.
+                has_inline_image = any(
+                    ttype == 4 and val == b"BI" for _, ttype, val in raw_tokens
+                )
+                if not has_inline_image:
+                    self.fp = BytesIO(combined)
+                    self._tokens.extend(_convert_rust_tokens(raw_tokens))
+                    self._rust_pretokenized = True
+            except Exception:
+                self._rust_pretokenized = False
+                self.fp = None  # type: ignore[assignment]
+                self.istream = 0
 
     def fillfp(self) -> bool:
         if not self.fp:
@@ -295,9 +326,32 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
 
     def seek(self, pos: int) -> None:
         self.fillfp()
-        PSStackParser.seek(self, pos)
+        if self._rust_pretokenized:
+            # PSBaseParser.seek() resets self._tokens; preserve them so the
+            # pre-built token list survives seek() calls from get_inline_data().
+            saved_tokens = self._tokens
+            PSStackParser.seek(self, pos)
+            self._tokens = saved_tokens
+        else:
+            PSStackParser.seek(self, pos)
 
     def fillbuf(self) -> bool:
+        if self._rust_pretokenized:
+            if self.charpos < len(self.buf):
+                return False
+            # nexttoken() calls fillbuf() only when self._tokens is empty.
+            # If tokens are already exhausted there is nothing left to parse.
+            # If tokens are still queued, this call came from get_inline_data()
+            # after a seek() — read raw bytes from fp to serve that path.
+            if not self._tokens:
+                raise PSEOF("Unexpected EOF")
+            if self.fp is not None:
+                self.bufpos = self.fp.tell()
+                self.buf = self.fp.read(self.BUFSIZ)
+                if self.buf:
+                    self.charpos = 0
+                    return False
+            return False
         if self.charpos < len(self.buf):
             return False
         new_stream = False

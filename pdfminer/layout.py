@@ -35,10 +35,15 @@ logger = logging.getLogger(__name__)
 try:
     from pdfminer_core import (  # type: ignore[import]
         group_chars_into_lines as _group_chars_into_lines,
+        group_textlines_fast as _group_textlines_fast,
+        compute_textbox_distances as _compute_textbox_distances,
     )
+    from pdfminer.utils import _RustPlane as _FastPlane
     _HAS_RUST = True
+    _PlaneClass: type = _FastPlane
 except ImportError:
     _HAS_RUST = False
+    _PlaneClass = Plane
 
 
 class IndexAssigner:
@@ -141,6 +146,13 @@ class LTText:
 
 class LTComponent(LTItem):
     """Object with a bounding box"""
+
+    # Integer type tag for fast dispatch (class-level constant, no per-instance cost).
+    # 0 = generic LTComponent / unknown subclass
+    # 1 = LTChar
+    # 3 = LTTextLine (and subclasses)
+    # 4 = LTTextBox (and subclasses)
+    _type_tag: int = 0
 
     def __init__(self, bbox: Rect) -> None:
         LTItem.__init__(self)
@@ -356,6 +368,8 @@ class LTAnno(LTItem, LTText):
 class LTChar(LTComponent, LTText):
     """Actual letter in the text as a Unicode string."""
 
+    _type_tag: int = 1
+
     def __init__(
         self,
         matrix: Matrix,
@@ -481,6 +495,10 @@ class LTTextLine(LTTextContainer[TextLineElement]):
     the text's writing mode.
     """
 
+    _type_tag: int = 3
+    # Subclasses override _is_horizontal; default True for LTTextLine itself.
+    _is_horizontal: bool = True
+
     def __init__(self, word_margin: float) -> None:
         super().__init__()
         self.word_margin = word_margin
@@ -505,6 +523,8 @@ class LTTextLine(LTTextContainer[TextLineElement]):
 
 
 class LTTextLineHorizontal(LTTextLine):
+    # _is_horizontal inherited as True from LTTextLine
+
     def __init__(self, word_margin: float) -> None:
         LTTextLine.__init__(self, word_margin)
         self._x1: float = +INF
@@ -512,7 +532,7 @@ class LTTextLineHorizontal(LTTextLine):
     # Incompatible override: we take an LTComponent (with bounding box), but
     # LTContainer only considers LTItem (no bounding box).
     def add(self, obj: LTComponent) -> None:  # type: ignore[override]
-        if isinstance(obj, LTChar) and self.word_margin:
+        if obj._type_tag == 1 and self.word_margin:  # LTChar._type_tag == 1
             margin = self.word_margin * max(obj.width, obj.height)
             if self._x1 < obj.x0 - margin:
                 LTContainer.add(self, LTAnno(" "))
@@ -568,6 +588,8 @@ class LTTextLineHorizontal(LTTextLine):
 
 
 class LTTextLineVertical(LTTextLine):
+    _is_horizontal: bool = False
+
     def __init__(self, word_margin: float) -> None:
         LTTextLine.__init__(self, word_margin)
         self._y0: float = -INF
@@ -575,7 +597,7 @@ class LTTextLineVertical(LTTextLine):
     # Incompatible override: we take an LTComponent (with bounding box), but
     # LTContainer only considers LTItem (no bounding box).
     def add(self, obj: LTComponent) -> None:  # type: ignore[override]
-        if isinstance(obj, LTChar) and self.word_margin:
+        if obj._type_tag == 1 and self.word_margin:  # LTChar._type_tag == 1
             margin = self.word_margin * max(obj.width, obj.height)
             if obj.y1 + margin < self._y0:
                 LTContainer.add(self, LTAnno(" "))
@@ -637,6 +659,8 @@ class LTTextBox(LTTextContainer[LTTextLine]):
     necessarily represents a logical boundary of the text. It contains a list
     of LTTextLine objects.
     """
+
+    _type_tag: int = 4
 
     def __init__(self) -> None:
         LTTextContainer.__init__(self)
@@ -792,7 +816,11 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         lines: Iterable[LTTextLine],
     ) -> Iterator[LTTextBox]:
         """Group neighboring lines to textboxes"""
-        plane: Plane[LTTextLine] = Plane(self.bbox)
+        lines = list(lines)
+        if _HAS_RUST and lines:
+            yield from self._group_textlines_rust(laparams, lines)
+            return
+        plane: Plane[LTTextLine] = _PlaneClass(self.bbox)
         plane.extend(lines)
         boxes: dict[LTTextLine, LTTextBox] = {}
         for line in lines:
@@ -802,14 +830,14 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                 members.append(obj1)
                 if obj1 in boxes:
                     members.extend(boxes.pop(obj1))
-            if isinstance(line, LTTextLineHorizontal):
+            if line._is_horizontal:
                 box: LTTextBox = LTTextBoxHorizontal()
             else:
                 box = LTTextBoxVertical()
             for obj in uniq(members):
                 box.add(obj)
                 boxes[obj] = box
-        done = set()
+        done: set[LTTextBox] = set()
         for line in lines:
             if line not in boxes:
                 continue
@@ -817,6 +845,34 @@ class LTLayoutContainer(LTContainer[LTComponent]):
             if box in done:
                 continue
             done.add(box)
+            if not box.is_empty():
+                yield box
+
+    def _group_textlines_rust(
+        self,
+        laparams: LAParams,
+        lines: list[LTTextLine],
+    ) -> Iterator[LTTextBox]:
+        """Rust-accelerated group_textlines using spatial union-find."""
+        bboxes = [
+            (l.x0, l.y0, l.x1, l.y1, l._is_horizontal)
+            for l in lines
+        ]
+        groups = _group_textlines_fast(
+            bboxes,
+            laparams.line_margin,
+            50.0,
+            self.bbox,
+        )
+        for group_indices in groups:
+            first = lines[group_indices[0]]
+            box: LTTextBox = (
+                LTTextBoxHorizontal()
+                if first._is_horizontal
+                else LTTextBoxVertical()
+            )
+            for idx in group_indices:
+                box.add(lines[idx])
             if not box.is_empty():
                 yield box
 
@@ -843,7 +899,7 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         :return: a list that has only one element, the final top level group.
         """
         ElementT = Union[LTTextBox, LTTextGroup]
-        plane: Plane[ElementT] = Plane(self.bbox)
+        plane: Plane[ElementT] = _PlaneClass(self.bbox)
 
         def dist(obj1: LTComponent, obj2: LTComponent) -> float:
             """A distance function between two TextBoxes.
@@ -867,21 +923,33 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                 - obj2.width * obj2.height
             )
 
-        def isany(obj1: ElementT, obj2: ElementT) -> set[ElementT]:
-            """Check if there's any other object between obj1 and obj2."""
+        def isany(obj1: ElementT, obj2: ElementT) -> bool:
+            """Return True if any plane object other than obj1/obj2 overlaps their bounding rect."""
             x0 = min(obj1.x0, obj2.x0)
             y0 = min(obj1.y0, obj2.y0)
             x1 = max(obj1.x1, obj2.x1)
             y1 = max(obj1.y1, obj2.y1)
-            objs = set(plane.find((x0, y0, x1, y1)))
-            return objs.difference((obj1, obj2))
+            bbox = (x0, y0, x1, y1)
+            if _HAS_RUST:
+                return plane.has_other_overlapping(bbox, obj1, obj2)  # type: ignore[union-attr]
+            for obj in plane.find(bbox):
+                if obj is not obj1 and obj is not obj2:
+                    return True
+            return False
 
         dists: list[tuple[bool, float, int, int, ElementT, ElementT]] = []
-        for i in range(len(boxes)):
-            box1 = boxes[i]
-            for j in range(i + 1, len(boxes)):
-                box2 = boxes[j]
-                dists.append((False, dist(box1, box2), id(box1), id(box2), box1, box2))
+        if _HAS_RUST and len(boxes) > 1:
+            raw = _compute_textbox_distances(
+                [(b.x0, b.y0, b.x1, b.y1) for b in boxes]
+            )
+            for d_val, i, j in raw:
+                dists.append((False, d_val, id(boxes[i]), id(boxes[j]), boxes[i], boxes[j]))
+        else:
+            for i in range(len(boxes)):
+                box1 = boxes[i]
+                for j in range(i + 1, len(boxes)):
+                    box2 = boxes[j]
+                    dists.append((False, dist(box1, box2), id(box1), id(box2), box1, box2))
         heapq.heapify(dists)
 
         plane.extend(boxes)
@@ -940,7 +1008,14 @@ class LTLayoutContainer(LTContainer[LTComponent]):
     def analyze(self, laparams: LAParams) -> None:
         # textobjs is a list of LTChar objects, i.e.
         # it has all the individual characters in the page.
-        (textobjs, otherobjs) = fsplit(lambda obj: isinstance(obj, LTChar), self)
+        # Use _type_tag fast path to avoid isinstance overhead in this hot loop.
+        textobjs: list[LTChar] = []
+        otherobjs: list[LTComponent] = []
+        for _obj in self:
+            if _obj._type_tag == 1:  # LTChar._type_tag == 1
+                textobjs.append(_obj)  # type: ignore[arg-type]
+            else:
+                otherobjs.append(_obj)
         for obj in otherobjs:
             obj.analyze(laparams)
         if not textobjs:

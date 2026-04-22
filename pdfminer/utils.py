@@ -836,6 +836,65 @@ class Plane(Generic[LTComponentT]):
                 yield obj
 
 
+class _RustPlane(Generic[LTComponentT]):
+    """Drop-in replacement for Plane backed by pdfminer_core.Plane.
+
+    pdfminer_core.Plane is an ID-based spatial index that stores (obj_id ->
+    bbox) entries.  This wrapper maps Python objects to their id() for the
+    Rust layer and keeps a parallel id->object dict so find() can return the
+    original objects.
+    """
+
+    def __init__(self, bbox: Rect, gridsize: int = 50) -> None:
+        self._rust = _core.Plane(bbox, float(gridsize))
+        self._seq: list[LTComponentT] = []
+        self._id_to_obj: dict[int, LTComponentT] = {}
+
+    def __repr__(self) -> str:
+        return f"<_RustPlane objs={list(self)!r}>"
+
+    def __iter__(self) -> Iterator[LTComponentT]:
+        return (obj for obj in self._seq if id(obj) in self._id_to_obj)
+
+    def __len__(self) -> int:
+        return len(self._id_to_obj)
+
+    def __contains__(self, obj: object) -> bool:
+        return id(obj) in self._id_to_obj
+
+    def extend(self, objs: Iterable[LTComponentT]) -> None:
+        for obj in objs:
+            self.add(obj)
+
+    def add(self, obj: LTComponentT) -> None:
+        oid = id(obj)
+        self._rust.add_bbox(oid, (obj.x0, obj.y0, obj.x1, obj.y1))  # type: ignore[union-attr]
+        self._seq.append(obj)
+        self._id_to_obj[oid] = obj
+
+    def remove(self, obj: LTComponentT) -> None:
+        oid = id(obj)
+        self._rust.remove_bbox(oid)
+        del self._id_to_obj[oid]
+
+    def find(self, bbox: Rect) -> Iterator[LTComponentT]:
+        for oid in self._rust.find_overlapping(bbox):
+            obj = self._id_to_obj.get(oid)
+            if obj is not None:
+                yield obj
+
+    def has_other_overlapping(
+        self, bbox: Rect, exclude1: "LTComponentT", exclude2: "LTComponentT"
+    ) -> bool:
+        """Return True if any object other than exclude1/exclude2 overlaps bbox."""
+        exc1 = id(exclude1)
+        exc2 = id(exclude2)
+        for oid in self._rust.find_overlapping(bbox):
+            if oid != exc1 and oid != exc2:
+                return True
+        return False
+
+
 ROMAN_ONES = ["i", "x", "c", "m"]
 ROMAN_FIVES = ["v", "l", "d"]
 
