@@ -233,7 +233,8 @@ class PDFResourceManager:
         if objid and objid in self._cached_fonts:
             font = self._cached_fonts[objid]
         else:
-            log.debug("get_font: create: objid=%r, spec=%r", objid, spec)
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("get_font: create: objid=%r, spec=%r", objid, spec)
             if settings.STRICT and spec["Type"] is not LITERAL_FONT:
                 raise PDFFontError("Type is not /Font")
             # Create a Font object.
@@ -274,6 +275,10 @@ class PDFResourceManager:
 
 
 class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
+    # Content streams are read sequentially without interleaved seek() calls,
+    # so it is safe to use the Rust batch tokenizer here.
+    _rust_batch_ok = True
+
     def __init__(self, streams: Sequence[object]) -> None:
         self.streams = streams
         self.istream = 0
@@ -436,7 +441,8 @@ class PDFPageInterpreter:
                 return PREDEFINED_COLORSPACE.get(name)
 
         for k, v in dict_value(resources).items():
-            log.debug("Resource: %r: %r", k, v)
+            if log.isEnabledFor(logging.DEBUG):
+                log.debug("Resource: %r: %r", k, v)
             if k == "Font":
                 for fontid, spec in dict_value(v).items():
                     objid = None
@@ -938,7 +944,8 @@ class PDFPageInterpreter:
             if len(components) == 1:
                 # Colored tiling pattern (PaintType=1): just pattern name
                 self.graphicstate.scolor = pattern_name
-                log.debug("Set stroke pattern (colored): %s", pattern_name)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("Set stroke pattern (colored): %s", pattern_name)
             else:
                 # Uncolored tiling pattern (PaintType=2):
                 # color components + pattern name
@@ -953,9 +960,12 @@ class PDFPageInterpreter:
 
                 # Store as tuple: (base_color, pattern_name)
                 self.graphicstate.scolor = (base_color, pattern_name)
-                log.debug(
-                    "Set stroke pattern (uncolored): %s + %s", base_color, pattern_name
-                )
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(
+                        "Set stroke pattern (uncolored): %s + %s",
+                        base_color,
+                        pattern_name,
+                    )
 
     def do_scn(self) -> None:
         """Set color for nonstroking operations.
@@ -1004,7 +1014,8 @@ class PDFPageInterpreter:
             if len(components) == 1:
                 # Colored tiling pattern (PaintType=1): just pattern name
                 self.graphicstate.ncolor = pattern_name
-                log.debug("Set non-stroke pattern (colored): %s", pattern_name)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("Set non-stroke pattern (colored): %s", pattern_name)
             else:
                 # Uncolored tiling pattern (PaintType=2):
                 # color components + pattern name
@@ -1019,10 +1030,11 @@ class PDFPageInterpreter:
 
                 # Store as tuple: (base_color, pattern_name)
                 self.graphicstate.ncolor = (base_color, pattern_name)
-                log.debug(
-                    "Set non-stroke pattern (uncolored): %s + %s",
-                    base_color,
-                    pattern_name,
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(
+                        "Set non-stroke pattern (uncolored): %s + %s",
+                        base_color,
+                        pattern_name,
                 )
 
     def do_SC(self) -> None:
@@ -1339,7 +1351,8 @@ class PDFPageInterpreter:
             if settings.STRICT:
                 raise PDFInterpreterError(f"Undefined xobject id: {xobjid!r}") from err
             return
-        log.debug("Processing xobj: %r", xobj)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Processing xobj: %r", xobj)
         subtype = xobj.get("Subtype")
         if subtype is LITERAL_FORM and "BBox" in xobj:
             interpreter = self.subinterp()
@@ -1366,7 +1379,8 @@ class PDFPageInterpreter:
             pass
 
     def process_page(self, page: PDFPage) -> None:
-        log.debug("Processing page: %r", page)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("Processing page: %r", page)
         (x0, y0, x1, y1) = page.mediabox
         if page.rotate == 90:
             ctm = (0, -1, 1, 0, -y0, x1)
@@ -1390,12 +1404,13 @@ class PDFPageInterpreter:
 
         This method may be called recursively.
         """
-        log.debug(
-            "render_contents: resources=%r, streams=%r, ctm=%r",
-            resources,
-            streams,
-            ctm,
-        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "render_contents: resources=%r, streams=%r, ctm=%r",
+                resources,
+                streams,
+                ctm,
+            )
         self.init_resources(resources)
         self.init_state(ctm)
         self.execute(list_value(streams))
@@ -1450,11 +1465,13 @@ class PDFPageInterpreter:
                     nargs = func.__code__.co_argcount - 1
                     if nargs:
                         args = self.pop(nargs)
-                        log.debug("exec: %s %r", name, args)
+                        if log.isEnabledFor(logging.DEBUG):
+                            log.debug("exec: %s %r", name, args)
                         if len(args) == nargs:
                             func(*args)
                     else:
-                        log.debug("exec: %s", name)
+                        if log.isEnabledFor(logging.DEBUG):
+                            log.debug("exec: %s", name)
                         func()
                 elif settings.STRICT:
                     error_msg = f"Unknown operator: {name!r}"

@@ -218,6 +218,10 @@ class PSBaseParser:
 
     BUFSIZ = 4096
 
+    # Subclasses that read streams sequentially (without interleaved seek() calls)
+    # can set this to True to enable Rust batch tokenization.
+    _rust_batch_ok: bool = False
+
     def __init__(self, fp: BinaryIO) -> None:
         self.fp = fp
         self.eof = False
@@ -231,7 +235,8 @@ class PSBaseParser:
 
     def seek(self, pos: int) -> None:
         """Seeks the parser to the given position."""
-        log.debug("seek: %r", pos)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("seek: %r", pos)
         self.fp.seek(pos)
         # reset the status for nextline()
         self.bufpos = pos
@@ -280,7 +285,8 @@ class PSBaseParser:
             else:
                 linebuf += self.buf[self.charpos :]
                 self.charpos = len(self.buf)
-        log.debug("nextline: %r, %r", linepos, linebuf)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("nextline: %r, %r", linepos, linebuf)
 
         return (linepos, linebuf)
 
@@ -539,25 +545,6 @@ class PSBaseParser:
             # It's not really unexpected, come on now...
             raise PSEOF("Unexpected EOF")
 
-        # Try Rust batch tokenization when in the main (non-partial) state.
-        # Only safe when _parse1 == _parse_main and no partial token is in progress.
-        if (
-            _HAS_RUST
-            and not self._tokens
-            and self._parse1 is self._parse_main
-            and not self._curtoken
-            and self.buf
-            and self.charpos < len(self.buf)
-        ):
-            remaining = self.buf[self.charpos:]
-            base = self.bufpos + self.charpos
-            raw_tokens, consumed = _tokenize_rust(remaining, base)
-            if consumed > 0:
-                self.charpos += consumed
-            if raw_tokens:
-                self._tokens.extend(_convert_rust_tokens(raw_tokens))
-
-        # Python fallback (handles partial tokens, edge cases, and non-main states).
         while not self._tokens:
             try:
                 changed_stream = self.fillbuf()
@@ -565,6 +552,25 @@ class PSBaseParser:
                     # Fixes #1157: if the stream is changed in the middle of a token,
                     # try to parse it by tacking on whitespace.
                     self._parse1(b"\n", 0)
+                elif (
+                    _HAS_RUST
+                    and self._rust_batch_ok
+                    and self._parse1.__func__ is PSBaseParser._parse_main
+                    and not self._curtoken
+                    and self.charpos < len(self.buf)
+                ):
+                    # Batch tokenize the buffer in Rust for performance.
+                    remaining = self.buf[self.charpos :]
+                    base = self.bufpos + self.charpos
+                    raw_tokens, consumed = _tokenize_rust(remaining, base)
+                    if consumed > 0:
+                        self.charpos += consumed
+                    if raw_tokens:
+                        self._tokens.extend(_convert_rust_tokens(raw_tokens))
+                    if not self._tokens:
+                        # Rust returned nothing (e.g. incomplete token at end of
+                        # buffer); fall back to Python for this buffer position.
+                        self.charpos = self._parse1(self.buf, self.charpos)
                 else:
                     self.charpos = self._parse1(self.buf, self.charpos)
             except PSEOF:
@@ -577,7 +583,8 @@ class PSBaseParser:
                 if not self._tokens:
                     raise
         token = self._tokens.pop(0)
-        log.debug("nexttoken: %r", token)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("nexttoken: %r", token)
         return token
 
 
@@ -623,23 +630,26 @@ class PSStackParser(PSBaseParser, Generic[ExtraT]):
         return objs
 
     def add_results(self, *objs: PSStackEntry[ExtraT]) -> None:
-        try:
-            log.debug("add_results: %r", objs)
-        except Exception:
-            log.debug("add_results: (unprintable object)")
+        if log.isEnabledFor(logging.DEBUG):
+            try:
+                log.debug("add_results: %r", objs)
+            except Exception:
+                log.debug("add_results: (unprintable object)")
         self.results.extend(objs)
 
     def start_type(self, pos: int, type: str) -> None:
         self.context.append((pos, self.curtype, self.curstack))
         (self.curtype, self.curstack) = (type, [])
-        log.debug("start_type: pos=%r, type=%r", pos, type)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("start_type: pos=%r, type=%r", pos, type)
 
     def end_type(self, type: str) -> tuple[int, list[PSStackType[ExtraT]]]:
         if self.curtype != type:
             raise PSTypeError(f"Type mismatch: {self.curtype!r} != {type!r}")
         objs = [obj for (_, obj) in self.curstack]
         (pos, self.curtype, self.curstack) = self.context.pop()
-        log.debug("end_type: pos=%r, type=%r, objs=%r", pos, type, objs)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("end_type: pos=%r, type=%r, objs=%r", pos, type, objs)
         return (pos, objs)
 
     def do_keyword(self, pos: int, token: PSKeyword) -> None:
@@ -698,12 +708,13 @@ class PSStackParser(PSBaseParser, Generic[ExtraT]):
                     if settings.STRICT:
                         raise
             elif isinstance(token, PSKeyword):
-                log.debug(
-                    "do_keyword: pos=%r, token=%r, stack=%r",
-                    pos,
-                    token,
-                    self.curstack,
-                )
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug(
+                        "do_keyword: pos=%r, token=%r, stack=%r",
+                        pos,
+                        token,
+                        self.curstack,
+                    )
                 self.do_keyword(pos, token)
             else:
                 log.error(
@@ -719,8 +730,9 @@ class PSStackParser(PSBaseParser, Generic[ExtraT]):
             else:
                 self.flush()
         obj = self.results.pop(0)
-        try:
-            log.debug("nextobject: %r", obj)
-        except Exception:
-            log.debug("nextobject: (unprintable object)")
+        if log.isEnabledFor(logging.DEBUG):
+            try:
+                log.debug("nextobject: %r", obj)
+            except Exception:
+                log.debug("nextobject: (unprintable object)")
         return obj
