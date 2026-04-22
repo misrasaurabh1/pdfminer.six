@@ -10,6 +10,13 @@
 #    "FACSIMILE CODING SCHEMES AND CODING CONTROL FUNCTIONS
 #    FOR GROUP 4 FACSIMILE APPARATUS"
 
+try:
+    from pdfminer_core import ccitt_fax_decode as _ccitt_rust
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 import array
 from collections.abc import Callable, Iterator, MutableSequence, Sequence
 from typing import (
@@ -553,6 +560,21 @@ class CCITTFaxDecoder(CCITTG4Parser):
 
 
 def ccittfaxdecode(data: bytes, params: dict[str, object]) -> bytes:
+    if _HAS_RUST:
+        return bytes(
+            _ccitt_rust(
+                data,
+                k=int(params.get("K", 0)),
+                columns=int(params.get("Columns", 1728)),
+                rows=int(params.get("Rows", 0)),
+                end_of_line=bool(params.get("EndOfLine", False)),
+                black_is_1=bool(params.get("BlackIs1", False)),
+                damaged_rows_before_error=int(
+                    params.get("DamagedRowsBeforeError", 0)
+                ),
+            )
+        )
+
     K = params.get("K")
     if K == -1:
         cols = cast(int, params.get("Columns"))

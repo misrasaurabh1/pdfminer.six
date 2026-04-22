@@ -5,6 +5,14 @@
 #  * public domain *
 #
 
+try:
+    from pdfminer_core import runlength_decode as _runlength_rust
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
 def rldecode(data: bytes) -> bytes:
     """RunLength decoder (Adobe version) implementation based on PDF Reference
     version 1.4 section 3.3.4:
@@ -18,6 +26,9 @@ def rldecode(data: bytes) -> bytes:
         (2 to 128) times during decompression. A length value of 128
         denotes EOD.
     """
+    if _HAS_RUST:
+        return bytes(_runlength_rust(data))
+
     decoded_array: list[int] = []
     data_iter = iter(data)
 
