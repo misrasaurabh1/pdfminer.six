@@ -163,7 +163,6 @@ class PDFTextDevice(PDFDevice):
     ) -> Point:
         (x, y) = pos
         needcharspace = False
-        # Cache method references to avoid per-character attribute lookups
         _render_char = self.render_char
         _translate_matrix = utils.translate_matrix
         for obj in seq:
@@ -212,6 +211,8 @@ class PDFTextDevice(PDFDevice):
     ) -> Point:
         (x, y) = pos
         needcharspace = False
+        _render_char = self.render_char
+        _translate_matrix = utils.translate_matrix
         for obj in seq:
             if isinstance(obj, (int, float)):
                 y -= obj * dxscale
@@ -220,8 +221,8 @@ class PDFTextDevice(PDFDevice):
                 for cid in font.decode(obj):
                     if needcharspace:
                         y += charspace
-                    y += self.render_char(
-                        utils.translate_matrix(matrix, (x, y)),
+                    y += _render_char(
+                        _translate_matrix(matrix, (x, y)),
                         font,
                         fontsize,
                         scaling,

@@ -129,12 +129,16 @@ class LAParams:
 class LTItem:
     """Interface for things that can be analyzed"""
 
+    __slots__ = ()
+
     def analyze(self, laparams: LAParams) -> None:
         """Perform the layout analysis."""
 
 
 class LTText:
     """Interface for things that have text"""
+
+    __slots__ = ()
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} {self.get_text()!r}>"
@@ -146,6 +150,8 @@ class LTText:
 
 class LTComponent(LTItem):
     """Object with a bounding box"""
+
+    __slots__ = ("bbox", "x0", "y0", "x1", "y1", "width", "height")
 
     # Integer type tag for fast dispatch (class-level constant, no per-instance cost).
     # 0 = generic LTComponent / unknown subclass
@@ -232,6 +238,11 @@ class LTCurve(LTComponent):
 
     `dashing_style` contains the Dashing information if any.
     """
+    __slots__ = (
+        "pts", "linewidth", "stroke", "fill", "evenodd",
+        "stroking_color", "non_stroking_color", "original_path", "dashing_style",
+    )
+
 
     def __init__(
         self,
@@ -265,6 +276,8 @@ class LTLine(LTCurve):
 
     Could be used for separating text or figures.
     """
+    __slots__ = ()
+
 
     def __init__(
         self,
@@ -298,6 +311,8 @@ class LTRect(LTCurve):
 
     Could be used for framing another pictures or figures.
     """
+    __slots__ = ()
+
 
     def __init__(
         self,
@@ -331,6 +346,8 @@ class LTImage(LTComponent):
 
     Embedded images can be in JPEG, Bitmap or JBIG2.
     """
+    __slots__ = ("name", "stream", "srcsize", "imagemask", "bits", "colorspace")
+
 
     def __init__(self, name: str, stream: PDFStream, bbox: Rect) -> None:
         LTComponent.__init__(self, bbox)
@@ -351,6 +368,8 @@ class LTImage(LTComponent):
 
 
 class LTAnno(LTItem, LTText):
+    __slots__ = ("_text",)
+
     """Actual letter in the text as a Unicode string.
 
     Note that, while a LTChar object has actual boundaries, LTAnno objects does
@@ -367,6 +386,11 @@ class LTAnno(LTItem, LTText):
 
 class LTChar(LTComponent, LTText):
     """Actual letter in the text as a Unicode string."""
+    __slots__ = (
+        "matrix", "_text", "fontname", "ncs", "graphicstate",
+        "size", "adv", "upright", "rendermode",
+    )
+
 
     _type_tag: int = 1
 
@@ -433,6 +457,8 @@ LTItemT = TypeVar("LTItemT", bound=LTItem)
 
 class LTContainer(LTComponent, Generic[LTItemT]):
     """Object that can be extended and analyzed"""
+    __slots__ = ("_objs",)
+
 
     def __init__(self, bbox: Rect) -> None:
         LTComponent.__init__(self, bbox)
@@ -475,6 +501,8 @@ class LTExpandableContainer(LTContainer[LTItemT]):
 
 
 class LTTextContainer(LTExpandableContainer[LTItemT], LTText):
+    __slots__ = ()
+
     def __init__(self) -> None:
         LTText.__init__(self)
         LTExpandableContainer.__init__(self)
@@ -494,6 +522,8 @@ class LTTextLine(LTTextContainer[TextLineElement]):
     The characters are aligned either horizontally or vertically, depending on
     the text's writing mode.
     """
+    __slots__ = ("word_margin",)
+
 
     _type_tag: int = 3
     # Subclasses override _is_horizontal; default True for LTTextLine itself.
@@ -523,6 +553,8 @@ class LTTextLine(LTTextContainer[TextLineElement]):
 
 
 class LTTextLineHorizontal(LTTextLine):
+    __slots__ = ("_x1",)
+
     # _is_horizontal inherited as True from LTTextLine
 
     def __init__(self, word_margin: float) -> None:
@@ -588,6 +620,8 @@ class LTTextLineHorizontal(LTTextLine):
 
 
 class LTTextLineVertical(LTTextLine):
+    __slots__ = ("_y0",)
+
     _is_horizontal: bool = False
 
     def __init__(self, word_margin: float) -> None:
@@ -659,6 +693,8 @@ class LTTextBox(LTTextContainer[LTTextLine]):
     necessarily represents a logical boundary of the text. It contains a list
     of LTTextLine objects.
     """
+    __slots__ = ("index",)
+
 
     _type_tag: int = 4
 
@@ -677,6 +713,8 @@ class LTTextBox(LTTextContainer[LTTextLine]):
 
 
 class LTTextBoxHorizontal(LTTextBox):
+    __slots__ = ()
+
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
         self._objs.sort(key=lambda obj: -obj.y1)
@@ -686,6 +724,8 @@ class LTTextBoxHorizontal(LTTextBox):
 
 
 class LTTextBoxVertical(LTTextBox):
+    __slots__ = ()
+
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
         self._objs.sort(key=lambda obj: -obj.x1)
@@ -698,12 +738,16 @@ TextGroupElement = Union[LTTextBox, "LTTextGroup"]
 
 
 class LTTextGroup(LTTextContainer[TextGroupElement]):
+    __slots__ = ()
+
     def __init__(self, objs: Iterable[TextGroupElement]) -> None:
         super().__init__()
         self.extend(objs)
 
 
 class LTTextGroupLRTB(LTTextGroup):
+    __slots__ = ()
+
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
         assert laparams.boxes_flow is not None
@@ -716,6 +760,8 @@ class LTTextGroupLRTB(LTTextGroup):
 
 
 class LTTextGroupTBRL(LTTextGroup):
+    __slots__ = ()
+
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
         assert laparams.boxes_flow is not None
@@ -728,6 +774,8 @@ class LTTextGroupTBRL(LTTextGroup):
 
 
 class LTLayoutContainer(LTContainer[LTComponent]):
+    __slots__ = ("groups",)
+
     def __init__(self, bbox: Rect) -> None:
         LTContainer.__init__(self, bbox)
         self.groups: list[LTTextGroup] | None = None
@@ -1062,6 +1110,8 @@ class LTFigure(LTLayoutContainer):
     another PDF document within a page. Note that LTFigure objects can appear
     recursively.
     """
+    __slots__ = ("name", "matrix")
+
 
     def __init__(self, name: str, bbox: Rect, matrix: Matrix) -> None:
         self.name = name
@@ -1090,6 +1140,8 @@ class LTPage(LTLayoutContainer):
     Like any other LTLayoutContainer, an LTPage can be iterated to obtain child
     objects like LTTextBox, LTFigure, LTImage, LTRect, LTCurve and LTLine.
     """
+    __slots__ = ("pageid", "rotate")
+
 
     def __init__(self, pageid: int, bbox: Rect, rotate: float = 0) -> None:
         LTLayoutContainer.__init__(self, bbox)
