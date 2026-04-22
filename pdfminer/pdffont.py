@@ -913,6 +913,7 @@ class PDFFont:
         self.leading = num_value(descriptor.get("Leading", 0))
         self.bbox = self._parse_bbox(descriptor)
         self.hscale = self.vscale = 0.001
+        self._char_width_cache: dict[int, float] = {}
 
         # PDF RM 9.8.1 specifies /Descent should always be a negative number.
         # PScript5.dll seems to produce Descent with a positive number, but
@@ -954,22 +955,32 @@ class PDFFont:
         return h * self.vscale
 
     def char_width(self, cid: int) -> float:
+        # Per-instance cache: CID values repeat heavily across a document.
+        cached = self._char_width_cache.get(cid)
+        if cached is not None:
+            return cached
         # Because character widths may be mapping either IDs or strings,
         # we try to lookup the character ID first, then its str equivalent.
         cid_width = safe_float(self.widths.get(cid))
         if cid_width is not None:
-            return cid_width * self.hscale
+            result = cid_width * self.hscale
+            self._char_width_cache[cid] = result
+            return result
 
         try:
             str_cid = self.to_unichr(cid)
             cid_width = safe_float(self.widths.get(str_cid))
             if cid_width is not None:
-                return cid_width * self.hscale
+                result = cid_width * self.hscale
+                self._char_width_cache[cid] = result
+                return result
 
         except PDFUnicodeNotDefined:
             pass
 
-        return self.default_width * self.hscale
+        result = self.default_width * self.hscale
+        self._char_width_cache[cid] = result
+        return result
 
     def char_disp(self, cid: int) -> float | tuple[float | None, float]:
         """Returns an integer for horizontal fonts, a tuple for vertical fonts."""

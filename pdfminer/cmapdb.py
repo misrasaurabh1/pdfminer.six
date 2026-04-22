@@ -33,6 +33,15 @@ from pdfminer.psexceptions import PSEOF, PSSyntaxError
 from pdfminer.psparser import KWD, PSKeyword, PSLiteral, PSStackParser, literal_name
 from pdfminer.utils import choplist, nunpack
 
+try:
+    from pdfminer_core import (  # type: ignore[import-not-found]
+        unicodemap_decode_batch as _unicodemap_decode_batch,
+    )
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 log = logging.getLogger(__name__)
 
 
@@ -88,7 +97,8 @@ class CMap(CMapBase):
         copy(self.code2cid, cmap.code2cid)
 
     def decode(self, code: bytes) -> Iterator[int]:
-        log.debug("decode: %r, %r", self, code)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("decode: %r, %r", self, code)
         d = self.code2cid
         for i in iter(code):
             if i in d:
@@ -145,8 +155,15 @@ class UnicodeMap(CMapBase):
         return "<UnicodeMap: {}>".format(self.attrs.get("CMapName"))
 
     def get_unichr(self, cid: int) -> str:
-        log.debug("get_unichr: %r, %r", self, cid)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("get_unichr: %r, %r", self, cid)
         return self.cid2unichr[cid]
+
+    def decode_batch(self, cids: "list[int]") -> "list[str | None]":
+        """Batch-decode a list of CIDs to unicode strings (None if not found)."""
+        if _HAS_RUST:
+            return _unicodemap_decode_batch(self.cid2unichr, cids)
+        return [self.cid2unichr.get(c) for c in cids]
 
     def dump(self, out: TextIO = sys.stdout) -> None:
         for k, v in sorted(self.cid2unichr.items()):
@@ -156,7 +173,8 @@ class UnicodeMap(CMapBase):
 class IdentityUnicodeMap(UnicodeMap):
     def get_unichr(self, cid: int) -> str:
         """Interpret character id as unicode codepoint"""
-        log.debug("get_unichr: %r, %r", self, cid)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("get_unichr: %r, %r", self, cid)
         return chr(cid)
 
 

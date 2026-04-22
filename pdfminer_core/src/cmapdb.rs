@@ -1,6 +1,27 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+/// Batch decode a list of CIDs to unicode strings using a cid2unichr dict.
+///
+/// Returns a list where each element is the unicode string for the CID,
+/// or None if the CID is not in the map.
+#[pyfunction]
+pub fn unicodemap_decode_batch(
+    py: Python<'_>,
+    cid2unichr: &Bound<'_, PyDict>,
+    cids: Vec<u32>,
+) -> PyResult<Vec<Option<String>>> {
+    let mut result = Vec::with_capacity(cids.len());
+    for cid in cids {
+        let key = cid.to_object(py);
+        match cid2unichr.get_item(key.bind(py))? {
+            Some(val) => result.push(val.extract::<Option<String>>()?),
+            None => result.push(None),
+        }
+    }
+    Ok(result)
+}
+
 /// Decode a byte sequence using a code2cid nested dict, returning CIDs.
 ///
 /// Values are either an int CID (leaf) or a nested dict (multi-byte prefix).
@@ -37,6 +58,7 @@ pub fn cmap_decode(
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(unicodemap_decode_batch, m)?)?;
     m.add_function(wrap_pyfunction!(cmap_decode, m)?)?;
     Ok(())
 }

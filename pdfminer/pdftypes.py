@@ -146,6 +146,10 @@ def resolve1(x: object, default: object = None) -> Any:
     If this is an array or dictionary, it may still contains
     some indirect objects inside.
     """
+    if not isinstance(x, PDFObjRef):
+        return x
+    x = x.resolve(default=default)
+    # Handle chained references (rare but possible)
     while isinstance(x, PDFObjRef):
         x = x.resolve(default=default)
     return x
