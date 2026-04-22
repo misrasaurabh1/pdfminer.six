@@ -351,18 +351,12 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                 # Keywords are encoded as (_RUST_TOK_KEYWORD, bytes) tuples;
                 # BI starts an inline image block whose raw binary data must
                 # be read via get_inline_data(), not via the pre-tokenized list.
-                has_inline_image = any(
-                    isinstance(val, tuple) and val == (_RUST_TOK_KEYWORD, b"BI")
-                    for _, val in raw_tokens
-                )
+                _BI_tok = (_RUST_TOK_KEYWORD, b"BI")
+                has_inline_image = any(val == _BI_tok for _, val in raw_tokens)
                 if not has_inline_image:
                     self.fp = BytesIO(combined)
-                    # Store tokens in a plain list and use an index counter for
-                    # O(1) access — avoids O(n) list.pop(0) per token.
-                    self._pretokenized_list: list[
-                        tuple[int, PSBaseParserToken]
-                    ] = _convert_rust_tokens(raw_tokens)
-                    self._pretokenized_pos: int = 0
+                    self._pretokenized_list = _convert_rust_tokens(raw_tokens)
+                    self._pretokenized_pos = 0
                     self._rust_pretokenized = True
             except Exception:
                 self._rust_pretokenized = False
@@ -462,32 +456,20 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
         self.add_results(*self.popall())
 
     def nextobject(self) -> "PSStackEntry[Union[PSKeyword, PDFStream]]":
-        """Fast nextobject() for the pretokenized path.
-
-        Delegates to the Rust next_object_from_tokens() helper which handles
-        scalars, arrays ([...]) and dicts (<<...>>) in a single pass over the
-        pre-tokenized list.  Inline-image keywords (BI/ID) and the active
-        context stack fall back to the parent PSStackParser state machine.
-        """
-        if not self._rust_pretokenized or self.results:
-            return super().nextobject()
-
-        tlist = self._pretokenized_list
-        idx = self._pretokenized_pos
-
-        # Inline images carry binary data that must be read via get_inline_data();
-        # let the parent state machine handle the BI/ID sequence.
-        if idx < len(tlist) and tlist[idx][1] in (self.KEYWORD_BI, self.KEYWORD_ID):
-            return super().nextobject()
-
-        if _rust_next_object_from_tokens is not None and not self.context:
+        """Fast nextobject() for the pretokenized path."""
+        # Fast path: pretokenized with no pending results and no open context.
+        if self._rust_pretokenized and not self.results and not self.context:
+            tlist = self._pretokenized_list
+            idx = self._pretokenized_pos
+            # Inline images need raw byte access — fall back for BI/ID.
+            if idx < len(tlist) and tlist[idx][1] in (self.KEYWORD_BI, self.KEYWORD_ID):
+                return super().nextobject()
             result = _rust_next_object_from_tokens(tlist, idx, PSKeyword, PSLiteral)
             if result is None:
                 raise PSEOF("Unexpected EOF")
             obj_tuple, new_pos = result
             self._pretokenized_pos = new_pos
             return obj_tuple
-
         return super().nextobject()
 
     KEYWORD_BI = KWD(b"BI")

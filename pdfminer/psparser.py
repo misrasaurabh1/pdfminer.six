@@ -182,18 +182,24 @@ def _convert_rust_tokens(
     - a ``(_RUST_TOK_LITERAL, name_bytes)`` tuple — converted via ``LIT()``
     - a ``(_RUST_TOK_KEYWORD, kw_bytes)`` tuple — converted via ``KWD()``
     """
+    # Bind locals for hot-path speed: type() is ~2x faster than isinstance() here
+    # because tuple subclasses don't exist in this context.
+    _tuple = tuple
+    _LIT = LIT
+    _KWD = KWD
+    _LITERAL = _RUST_TOK_LITERAL
     result: list[tuple[int, PSBaseParserToken]] = []
     for pos, value in raw:
-        if isinstance(value, tuple):
+        if type(value) is _tuple:
             ttype, raw_bytes = value
-            if ttype == _RUST_TOK_LITERAL:
+            if ttype == _LITERAL:
                 try:
                     name: str | bytes = str(raw_bytes, "utf-8")
                 except Exception:
                     name = raw_bytes
-                result.append((pos, LIT(name)))
+                result.append((pos, _LIT(name)))
             else:
-                result.append((pos, KWD(raw_bytes)))
+                result.append((pos, _KWD(raw_bytes)))
         else:
             result.append((pos, value))
     return result

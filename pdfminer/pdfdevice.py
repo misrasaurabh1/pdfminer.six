@@ -27,12 +27,10 @@ try:
     import pdfminer_core as _pdfminer_core  # type: ignore[import-not-found]
 
     _rust_compute_char_matrices = _pdfminer_core.compute_char_matrices
-    _rust_build_ltchar_batch = _pdfminer_core.build_ltchar_batch
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
     _rust_compute_char_matrices = None
-    _rust_build_ltchar_batch = None
 
 PDFTextSeq = Iterable[int | float | bytes]
 

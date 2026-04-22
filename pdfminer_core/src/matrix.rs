@@ -138,6 +138,21 @@ pub(crate) fn apply_matrix_pt_inner(m: M6, x: f64, y: f64) -> P2 {
     (a * x + c * y + e, b * x + d * y + f)
 }
 
+/// Native Rust version of apply_matrix_rect — no PyAny overhead.
+pub(crate) fn apply_matrix_rect_impl(m: M6, rect: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let (x0, y0, x1, y1) = rect;
+    let (lx0, ly0) = apply_matrix_pt_inner(m, x0, y0);
+    let (rx0, ry0) = apply_matrix_pt_inner(m, x1, y0);
+    let (rx1, ry1) = apply_matrix_pt_inner(m, x1, y1);
+    let (lx1, ly1) = apply_matrix_pt_inner(m, x0, y1);
+    (
+        lx0.min(lx1).min(rx0).min(rx1),
+        ly0.min(ly1).min(ry0).min(ry1),
+        lx0.max(lx1).max(rx0).max(rx1),
+        ly0.max(ly1).max(ry0).max(ry1),
+    )
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mult_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(translate_matrix, m)?)?;

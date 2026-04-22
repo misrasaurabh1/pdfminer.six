@@ -15,6 +15,7 @@ from pdfminer.layout import (
     LAParams,
     LTAnno,
     LTChar,
+    LTCharPython,
     LTComponent,
     LTContainer,
     LTCurve,
@@ -33,7 +34,13 @@ from pdfminer.layout import (
     TextGroupElement,
 )
 from pdfminer.pdfcolor import PDFColorSpace
-from pdfminer.pdfdevice import PDFTextDevice, PDFTextSeq, _HAS_RUST, _rust_build_ltchar_batch
+from pdfminer.pdfdevice import PDFTextDevice, PDFTextSeq, _HAS_RUST, _rust_compute_char_matrices
+try:
+    from pdfminer_core.pdfminer_core import build_ltchar_objects as _build_ltchar_objects  # type: ignore[import]
+    _HAS_RUST_LTCHAR = True
+except ImportError:
+    _build_ltchar_objects = None  # type: ignore[assignment]
+    _HAS_RUST_LTCHAR = False
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdffont import PDFFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager, PDFTextState
@@ -262,7 +269,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
             text = self.handle_undefined_char(font, cid)
         textwidth = font.char_width(cid)
         textdisp = font.char_disp(cid)
-        item = LTChar(
+        item = LTCharPython(
             matrix,
             font,
             fontsize,
@@ -298,26 +305,19 @@ class PDFLayoutAnalyzer(PDFTextDevice):
     ) -> Point:
         if _HAS_RUST:
             (x, y) = pos
-            items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
+            items: list[tuple[int, float, float, bool]] = []
             pending_adj: float = 0.0
             needcharspace = False
-            descent = font.get_descent()
+            _fsc_pre = fontsize * scaling
+            _char_width = font.char_width
             for obj in seq:
                 if isinstance(obj, (int, float)):
                     pending_adj += obj * dxscale
                     needcharspace = True
                 elif isinstance(obj, bytes):
                     for cid in font.decode(obj):
-                        try:
-                            text = font.to_unichr(cid)
-                        except PDFUnicodeNotDefined:
-                            text = self.handle_undefined_char(font, cid)
-                        char_width = font.char_width(cid)
-                        items.append((
-                            cid, text, char_width,
-                            descent, 0.0, False,
-                            pending_adj, needcharspace,
-                        ))
+                        advance = _char_width(cid) * _fsc_pre
+                        items.append((cid, advance, pending_adj, needcharspace))
                         pending_adj = 0.0
                         needcharspace = True
                 else:
@@ -328,13 +328,70 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                     )
             if not items:
                 return (x - pending_adj, y)
-            ltchars, x, _ = _rust_build_ltchar_batch(
-                LTChar, matrix, x, y, items,
-                fontsize, scaling, charspace, wordspace, rise,
-                font.fontname, ncs, graphicstate,
+            matrices, x, _ = _rust_compute_char_matrices(
+                matrix, x, y, items, charspace, wordspace, True
             )
             x -= pending_adj
-            self._pending_chars.extend(ltchars)
+            _fsc = _fsc_pre
+            _is_vertical = font.is_vertical()
+            _descent = font.get_descent()
+
+            if _HAS_RUST_LTCHAR:
+                # Build all LTChar objects in one Rust call — eliminates the Python
+                # per-char loop and avoids Python slot descriptor overhead per object.
+                _unichr_cache = font._unichr_cache
+                _to_unichr = font.to_unichr
+                _char_disp = font.char_disp
+                _disp_cache: dict[int, float | tuple[float | None, float]] = {}
+                _handle_undef = self.handle_undefined_char
+                char_data = []
+                for char_matrix, item in zip(matrices, items):
+                    cid = item[0]
+                    text = _unichr_cache.get(cid)
+                    if text is None:
+                        try:
+                            text = _to_unichr(cid)
+                        except PDFUnicodeNotDefined:
+                            text = _handle_undef(font, cid)
+                    textdisp = _disp_cache.get(cid)
+                    if textdisp is None:
+                        textdisp = _char_disp(cid)
+                        _disp_cache[cid] = textdisp
+                    if isinstance(textdisp, tuple):
+                        td_desc = float(textdisp[1])
+                        td_vx = -1.0 if textdisp[0] is None else float(textdisp[0])
+                    else:
+                        td_desc = float(textdisp)
+                        td_vx = -1.0
+                    char_data.append((char_matrix, cid, text, item[1] / _fsc, td_desc, td_vx))
+                ltchars = _build_ltchar_objects(
+                    char_data, ncs, graphicstate,
+                    font.fontname, fontsize, scaling, rise, _is_vertical, _descent,
+                )
+                self._pending_chars.extend(ltchars)
+            else:
+                _append = self._pending_chars.append
+                _LTChar = LTCharPython  # Python class with old __init__ signature
+                _unichr_cache = font._unichr_cache
+                _to_unichr = font.to_unichr
+                _char_disp = font.char_disp
+                _disp_cache2: dict[int, float | tuple[float | None, float]] = {}
+                _handle_undef = self.handle_undefined_char
+                for char_matrix, item in zip(matrices, items):
+                    cid = item[0]
+                    text = _unichr_cache.get(cid)
+                    if text is None:
+                        try:
+                            text = _to_unichr(cid)
+                        except PDFUnicodeNotDefined:
+                            text = _handle_undef(font, cid)
+                    textdisp = _disp_cache2.get(cid)
+                    if textdisp is None:
+                        textdisp = _char_disp(cid)
+                        _disp_cache2[cid] = textdisp
+                    _append(_LTChar(char_matrix, font, fontsize, scaling, rise,
+                                    text, item[1] / _fsc, textdisp, ncs, graphicstate,
+                                    _is_vertical, _descent))
             return (x, y)
         return super().render_string_horizontal(
             seq, matrix, pos, font, fontsize, scaling,
@@ -358,34 +415,19 @@ class PDFLayoutAnalyzer(PDFTextDevice):
     ) -> Point:
         if _HAS_RUST:
             (x, y) = pos
-            items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
+            items: list[tuple[int, float, float, bool]] = []
             pending_adj: float = 0.0
             needcharspace = False
+            _fsc_pre = fontsize * scaling
+            _char_width = font.char_width
             for obj in seq:
                 if isinstance(obj, (int, float)):
                     pending_adj += obj * dxscale
                     needcharspace = True
                 elif isinstance(obj, bytes):
                     for cid in font.decode(obj):
-                        try:
-                            text = font.to_unichr(cid)
-                        except PDFUnicodeNotDefined:
-                            text = self.handle_undefined_char(font, cid)
-                        char_width = font.char_width(cid)
-                        textdisp = font.char_disp(cid)
-                        if isinstance(textdisp, tuple):
-                            vx_raw, vy_raw = textdisp
-                            # -1.0 sentinel means vx was None (per-glyph default)
-                            vx_val = -1.0 if vx_raw is None else float(vx_raw)
-                            vy_val = float(vy_raw)
-                        else:
-                            vx_val = -1.0
-                            vy_val = 0.0
-                        items.append((
-                            cid, text, char_width,
-                            vx_val, vy_val, True,
-                            pending_adj, needcharspace,
-                        ))
+                        advance = _char_width(cid) * _fsc_pre
+                        items.append((cid, advance, pending_adj, needcharspace))
                         pending_adj = 0.0
                         needcharspace = True
                 else:
@@ -396,13 +438,35 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                     )
             if not items:
                 return (x, y - pending_adj)
-            ltchars, _, y = _rust_build_ltchar_batch(
-                LTChar, matrix, x, y, items,
-                fontsize, scaling, charspace, wordspace, rise,
-                font.fontname, ncs, graphicstate,
+            matrices, _, y = _rust_compute_char_matrices(
+                matrix, x, y, items, charspace, wordspace, False
             )
             y -= pending_adj
-            self._pending_chars.extend(ltchars)
+            _fsc = _fsc_pre
+            _append = self._pending_chars.append
+            _LTChar = LTCharPython  # use Python class — vertical path needs old __init__ signature
+            _is_vertical = font.is_vertical()
+            _descent = font.get_descent()
+            _unichr_cache = font._unichr_cache
+            _to_unichr = font.to_unichr
+            _char_disp = font.char_disp
+            _disp_cache: dict[int, float | tuple[float | None, float]] = {}
+            _handle_undef = self.handle_undefined_char
+            for char_matrix, item in zip(matrices, items):
+                cid = item[0]
+                text = _unichr_cache.get(cid)
+                if text is None:
+                    try:
+                        text = _to_unichr(cid)
+                    except PDFUnicodeNotDefined:
+                        text = _handle_undef(font, cid)
+                textdisp = _disp_cache.get(cid)
+                if textdisp is None:
+                    textdisp = _char_disp(cid)
+                    _disp_cache[cid] = textdisp
+                _append(_LTChar(char_matrix, font, fontsize, scaling, rise,
+                                text, item[1] / _fsc, textdisp, ncs, graphicstate,
+                                _is_vertical, _descent))
             return (x, y)
         return super().render_string_vertical(
             seq, matrix, pos, font, fontsize, scaling,
@@ -496,8 +560,8 @@ class TextConverter(PDFConverter[AnyIO]):
             if isinstance(item, LTContainer):
                 for child in item:
                     render(child)
-            elif isinstance(item, LTText):
-                self.write_text(item.get_text())
+            elif isinstance(item, LTText) or hasattr(item, "get_text"):
+                self.write_text(item.get_text())  # type: ignore[union-attr]
             if isinstance(item, LTTextBox):
                 self.write_text("\n")
             elif isinstance(item, LTImage) and self.imagewriter is not None:

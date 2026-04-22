@@ -38,7 +38,11 @@ try:
         compute_textbox_distances as _compute_textbox_distances,
         compute_word_gaps as _compute_word_gaps,
         expand_bbox as _expand_bbox,
-        compute_group_bbox as _compute_group_bbox,
+        apply_matrix_rect as apply_matrix_rect,  # direct Rust, skips Python wrapper
+    )
+    from pdfminer_core.pdfminer_core import (  # type: ignore[import]
+        LTChar as _RustLTChar,
+        build_ltchar_objects as _build_ltchar_objects,
     )
     from pdfminer.utils import _RustPlane as _FastPlane
     _HAS_RUST = True
@@ -47,6 +51,8 @@ except ImportError:
     _HAS_RUST = False
     _PlaneClass = Plane
     _expand_bbox = None
+    _RustLTChar = None  # type: ignore[assignment]
+    _build_ltchar_objects = None  # type: ignore[assignment]
 
 
 class IndexAssigner:
@@ -409,16 +415,21 @@ class LTChar(LTComponent, LTText):
         textdisp: float | tuple[float | None, float],
         ncs: PDFColorSpace,
         graphicstate: PDFGraphicState,
+        _vertical: bool | None = None,
+        _descent: float | None = None,
     ) -> None:
         # Bypass LTText.__init__ (no-op) and LTComponent.__init__ (calls set_bbox)
-        # to eliminate 2 extra call frames per character (125k chars/run).
+        # to eliminate 2 extra call frames per character.
+        # _vertical and _descent are optional pre-computed values — callers in the
+        # hot path pass them to avoid redundant font.is_vertical()/get_descent()
+        # calls (those are constant per font but called per character otherwise).
         self._text = text
         self.matrix = matrix
         self.fontname = font.fontname
         self.ncs = ncs
         self.graphicstate = graphicstate
         self.adv = textwidth * fontsize * scaling
-        vertical = font.is_vertical()
+        vertical = font.is_vertical() if _vertical is None else _vertical
         if vertical:
             assert isinstance(textdisp, tuple)
             (vx, vy) = textdisp
@@ -426,10 +437,10 @@ class LTChar(LTComponent, LTText):
             vy = (1000 - vy) * fontsize * 0.001
             bbox = (-vx, vy + rise + self.adv, -vx + fontsize, vy + rise)
         else:
-            descent = font.get_descent() * fontsize
-            bbox = (0, descent + rise, self.adv, descent + rise + fontsize)
-        (a, b, c, d, _e, _f) = self.matrix
-        self.upright = a * d * scaling > 0 and b * c <= 0
+            d = (font.get_descent() if _descent is None else _descent) * fontsize
+            bbox = (0, d + rise, self.adv, d + rise + fontsize)
+        (a, b, c, dd, _e, _f) = self.matrix
+        self.upright = a * dd * scaling > 0 and b * c <= 0
         (x0, y0, x1, y1) = apply_matrix_rect(self.matrix, bbox)
         if x1 < x0:
             (x0, x1) = (x1, x0)
@@ -443,6 +454,7 @@ class LTChar(LTComponent, LTText):
         self.height = y1 - y0
         self.bbox = (x0, y0, x1, y1)
         self.rendermode = 0
+        # For vertical text width is the advance dimension; for horizontal, height.
         self.size = self.width if vertical else self.height
 
     def __repr__(self) -> str:
@@ -457,6 +469,18 @@ class LTChar(LTComponent, LTText):
     def get_text(self) -> str:
         return self._text
 
+
+# Keep original Python LTChar for callers that use the old __init__ signature
+# (e.g. render_string_vertical, PDFDevice.render_char).
+LTCharPython = LTChar
+
+# Replace LTChar with the Rust-backed implementation when available.
+# The Rust class has identical public attributes and supports dynamic
+# attribute assignment (dict=true), so `obj.rendermode = 7` works.
+# By reassigning the module-level name, all `isinstance(obj, LTChar)`
+# checks automatically use the Rust class.
+if _HAS_RUST and _RustLTChar is not None:
+    LTChar = _RustLTChar  # type: ignore[assignment,misc]
 
 LTItemT = TypeVar("LTItemT", bound=LTItem)
 
@@ -517,7 +541,7 @@ class LTTextContainer(LTExpandableContainer[LTItemT], LTText):
 
     def get_text(self) -> str:
         return "".join(
-            obj.get_text() for obj in self if isinstance(obj, LTText)  # type: ignore[union-attr]
+            obj.get_text() for obj in self if hasattr(obj, "get_text")  # type: ignore[union-attr]
         )
 
 
@@ -1098,9 +1122,9 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         for char_indices, space_positions in _compute_word_gaps(
             char_bboxes, groups, word_margin
         ):
-            lx0, ly0, lx1, ly1 = _compute_group_bbox(char_bboxes, char_indices)
+            first = objs[char_indices[0]]
+            lx0, ly0, lx1, ly1 = first.x0, first.y0, first.x1, first.y1
             if space_positions:
-                # Interleave LTAnno spaces at the requested positions.
                 sp_iter = iter(space_positions)
                 next_sp = next(sp_iter, None)
                 line_objs: list[LTItem] = []
@@ -1108,9 +1132,21 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                     if pos == next_sp:
                         line_objs.append(_anno_space)
                         next_sp = next(sp_iter, None)
-                    line_objs.append(objs[idx])
+                    ch = objs[idx]
+                    line_objs.append(ch)
+                    if ch.x0 < lx0: lx0 = ch.x0
+                    if ch.y0 < ly0: ly0 = ch.y0
+                    if ch.x1 > lx1: lx1 = ch.x1
+                    if ch.y1 > ly1: ly1 = ch.y1
             else:
-                line_objs = [objs[idx] for idx in char_indices]  # type: ignore[misc]
+                line_objs = []
+                for idx in char_indices:
+                    ch = objs[idx]
+                    line_objs.append(ch)  # type: ignore[misc]
+                    if ch.x0 < lx0: lx0 = ch.x0
+                    if ch.y0 < ly0: ly0 = ch.y0
+                    if ch.x1 > lx1: lx1 = ch.x1
+                    if ch.y1 > ly1: ly1 = ch.y1
 
             # Build LTTextLineHorizontal without calling add() for each object.
             line: LTTextLineHorizontal = LTTextLineHorizontal.__new__(
