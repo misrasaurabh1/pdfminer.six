@@ -13,9 +13,8 @@ HEXADECIMAL = re.compile(r"[0-9a-fA-F]+")
 log = logging.getLogger(__name__)
 
 try:
-    from pdfminer_core import (
-        glyph_name_to_unicode as _rust_glyph_name_to_unicode,  # type: ignore[import]
-    )
+    from pdfminer_core import name_to_unicode as _rust_name_to_unicode  # type: ignore[import]
+
     _HAS_RUST_GLYPHLIST = True
 except ImportError:
     _HAS_RUST_GLYPHLIST = False
@@ -47,12 +46,17 @@ def name2unicode(name: str) -> str:
     if len(components) > 1:
         return "".join(map(name2unicode, components))
 
-    elif _HAS_RUST_GLYPHLIST and (cp := _rust_glyph_name_to_unicode(name)) is not None:
-        return chr(cp)
-    elif name in glyphname2unicode:
+    if _HAS_RUST_GLYPHLIST:
+        try:
+            return _rust_name_to_unicode(name)
+        except KeyError as e:
+            raise PDFKeyError(str(e)) from e
+
+    # Pure-Python fallback (used when Rust extension is not available).
+    if name in glyphname2unicode:
         return glyphname2unicode[name]
 
-    elif name.startswith("uni"):
+    if name.startswith("uni"):
         name_without_uni = name.strip("uni")
 
         if HEXADECIMAL.match(name_without_uni) and len(name_without_uni) % 4 == 0:

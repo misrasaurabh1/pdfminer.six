@@ -133,7 +133,7 @@ pub fn apply_matrix_rect(
 }
 
 #[inline(always)]
-fn apply_matrix_pt_inner(m: M6, x: f64, y: f64) -> P2 {
+pub(crate) fn apply_matrix_pt_inner(m: M6, x: f64, y: f64) -> P2 {
     let (a, b, c, d, e, f) = m;
     (a * x + c * y + e, b * x + d * y + f)
 }

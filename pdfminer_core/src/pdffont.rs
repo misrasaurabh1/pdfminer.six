@@ -1,3 +1,4 @@
+use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 
@@ -4301,6 +4302,60 @@ pub fn glyph_name_to_unicode(name: &str) -> Option<u32> {
     glyph_map().get(name).copied()
 }
 
+/// Convert an Adobe glyph name to a Unicode string, following the Adobe Glyph List
+/// specification. Mirrors the Python `name2unicode()` logic.
+///
+/// Handles direct glyph map lookup, `uniXXXX[YYYY…]` multi-codepoint sequences,
+/// and `uXXXX`–`uXXXXXX` single-codepoint names.
+///
+/// `.`-suffix stripping and `_`-component splitting are left to the Python caller,
+/// matching the existing layered design.
+///
+/// Raises `KeyError` if the name cannot be resolved.
+#[pyfunction]
+pub fn name_to_unicode(name: &str) -> PyResult<String> {
+    if let Some(&cp) = glyph_map().get(name) {
+        return char::from_u32(cp)
+            .map(|c| c.to_string())
+            .ok_or_else(|| PyKeyError::new_err(format!("Invalid codepoint 0x{:X} for glyph '{}'", cp, name)));
+    }
+
+    if let Some(rest) = name.strip_prefix("uni") {
+        if !rest.is_empty() && rest.len() % 4 == 0 && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+            let mut result = String::with_capacity(rest.len() / 4);
+            for chunk in rest.as_bytes().chunks(4) {
+                // Safety: chunk came from a UTF-8 str and contains only ASCII hex digits.
+                let s = std::str::from_utf8(chunk).unwrap();
+                let cp = u32::from_str_radix(s, 16).unwrap();
+                // char::from_u32 rejects surrogates (D800–DFFF) and values > 0x10FFFF.
+                match char::from_u32(cp) {
+                    Some(c) => result.push(c),
+                    None => return Err(PyKeyError::new_err(format!(
+                        "Unicode digit {} is invalid because it is in the range D800 through DFFF",
+                        cp
+                    ))),
+                }
+            }
+            return Ok(result);
+        }
+    }
+
+    if let Some(rest) = name.strip_prefix('u') {
+        if (4..=6).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_hexdigit()) {
+            let cp = u32::from_str_radix(rest, 16).unwrap();
+            // char::from_u32 rejects surrogates (D800–DFFF) and values > 0x10FFFF.
+            if let Some(c) = char::from_u32(cp) {
+                return Ok(c.to_string());
+            }
+        }
+    }
+
+    Err(PyKeyError::new_err(format!(
+        "Could not convert unicode name \"{}\" to character because it does not match specification",
+        name
+    )))
+}
+
 /// Look up character width from a flat CID->width dict (as list of (cid, width) pairs).
 /// Returns default_width if the CID is not found.
 ///
@@ -4333,6 +4388,7 @@ pub fn decode_with_encoding(
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(glyph_name_to_unicode, m)?)?;
+    m.add_function(wrap_pyfunction!(name_to_unicode, m)?)?;
     m.add_function(wrap_pyfunction!(lookup_char_width, m)?)?;
     m.add_function(wrap_pyfunction!(decode_with_encoding, m)?)?;
     Ok(())

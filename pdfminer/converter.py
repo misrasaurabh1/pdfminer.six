@@ -296,14 +296,12 @@ class PDFLayoutAnalyzer(PDFTextDevice):
         ncs: PDFColorSpace,
         graphicstate: PDFGraphicState,
     ) -> Point:
-        if _HAS_RUST and _rust_build_ltchar_batch is not None:
+        if _HAS_RUST:
             (x, y) = pos
-            # Collect all char data in one pass, interleaving spacing adjustments
             items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
             pending_adj: float = 0.0
             needcharspace = False
             descent = font.get_descent()
-            is_vertical = False
             for obj in seq:
                 if isinstance(obj, (int, float)):
                     pending_adj += obj * dxscale
@@ -317,9 +315,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                         char_width = font.char_width(cid)
                         items.append((
                             cid, text, char_width,
-                            descent,  # descent_or_vx for horizontal
-                            0.0,      # vy_if_vertical (unused)
-                            is_vertical,
+                            descent, 0.0, False,
                             pending_adj, needcharspace,
                         ))
                         pending_adj = 0.0
@@ -340,7 +336,6 @@ class PDFLayoutAnalyzer(PDFTextDevice):
             x -= pending_adj
             self._pending_chars.extend(ltchars)
             return (x, y)
-        # Fall back to base class implementation (uses per-char render_char)
         return super().render_string_horizontal(
             seq, matrix, pos, font, fontsize, scaling,
             charspace, wordspace, rise, dxscale, ncs, graphicstate,
@@ -361,12 +356,11 @@ class PDFLayoutAnalyzer(PDFTextDevice):
         ncs: PDFColorSpace,
         graphicstate: PDFGraphicState,
     ) -> Point:
-        if _HAS_RUST and _rust_build_ltchar_batch is not None:
+        if _HAS_RUST:
             (x, y) = pos
             items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
             pending_adj: float = 0.0
             needcharspace = False
-            is_vertical = True
             for obj in seq:
                 if isinstance(obj, (int, float)):
                     pending_adj += obj * dxscale
@@ -379,10 +373,9 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                             text = self.handle_undefined_char(font, cid)
                         char_width = font.char_width(cid)
                         textdisp = font.char_disp(cid)
-                        # For vertical fonts, textdisp is (vx, vy) tuple
                         if isinstance(textdisp, tuple):
                             vx_raw, vy_raw = textdisp
-                            # Sentinel -1.0 means vx was None
+                            # -1.0 sentinel means vx was None (per-glyph default)
                             vx_val = -1.0 if vx_raw is None else float(vx_raw)
                             vy_val = float(vy_raw)
                         else:
@@ -390,8 +383,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                             vy_val = 0.0
                         items.append((
                             cid, text, char_width,
-                            vx_val, vy_val,
-                            is_vertical,
+                            vx_val, vy_val, True,
                             pending_adj, needcharspace,
                         ))
                         pending_adj = 0.0

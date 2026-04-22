@@ -36,6 +36,7 @@ from pdfminer.utils import choplist, nunpack
 try:
     from pdfminer_core import (  # type: ignore[import-not-found]
         unicodemap_decode_batch as _unicodemap_decode_batch,
+        parse_cmap_stream as _parse_cmap_stream,
     )
 
     _HAS_RUST = True
@@ -342,6 +343,22 @@ class CMapParser(PSStackParser[PSKeyword]):
         self._warnings: set[str] = set()
 
     def run(self) -> None:
+        if _HAS_RUST:
+            data = self.fp.read()
+            cid2unichr, attrs = _parse_cmap_stream(data)
+            # Handle usecmap: Rust signals it via attrs["_usecmap"]
+            use_cmap_name = attrs.pop("_usecmap", None)
+            if isinstance(self.cmap, FileUnicodeMap):
+                self.cmap.cid2unichr.update(cid2unichr)
+                self.cmap.attrs.update(attrs)
+            else:
+                self.cmap.attrs.update(attrs)
+            if use_cmap_name is not None:
+                try:
+                    self.cmap.use_cmap(CMapDB.get_cmap(use_cmap_name))
+                except (PSSyntaxError, CMapDB.CMapNotFound):
+                    pass
+            return
         with contextlib.suppress(PSEOF):
             self.nextobject()
 

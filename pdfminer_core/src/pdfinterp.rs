@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
+use crate::matrix::apply_matrix_pt_inner;
 
 /// Split a flat list of `(pos, token)` pairs into `(operands, operator)` groups.
 ///
@@ -262,6 +263,154 @@ pub fn decode_bytes_to_cids(encoding: Vec<u32>, data: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Apply a matrix to a rect and return its bounding box — no Python overhead.
+/// Reuses the shared apply_matrix_pt_inner from the matrix module.
+#[inline(always)]
+fn apply_matrix_rect_inner(
+    m: (f64, f64, f64, f64, f64, f64),
+    bx0: f64, by0: f64, bx1: f64, by1: f64,
+) -> (f64, f64, f64, f64) {
+    let (ax, ay) = apply_matrix_pt_inner(m, bx0, by0);
+    let (bx, by_) = apply_matrix_pt_inner(m, bx1, by0);
+    let (cx, cy) = apply_matrix_pt_inner(m, bx1, by1);
+    let (dx, dy) = apply_matrix_pt_inner(m, bx0, by1);
+    (
+        ax.min(bx).min(cx).min(dx),
+        ay.min(by_).min(cy).min(dy),
+        ax.max(bx).max(cx).max(dx),
+        ay.max(by_).max(cy).max(dy),
+    )
+}
+
+/// Build a list of Python LTChar objects in one Rust call, bypassing __init__.
+///
+/// This collapses the render_string_horizontal/vertical → render_char → LTChar.__init__
+/// call chain into a single FFI call. For each character, it:
+///   1. Computes the translated matrix (same as compute_char_matrices)
+///   2. Computes the bbox (same as LTChar.__init__)
+///   3. Creates the LTChar Python object via __new__ + direct slot assignment
+///
+/// Parameters
+/// ----------
+/// ltchar_type : the LTChar class object
+/// matrix : base text matrix (a,b,c,d,e,f) — combined textstate.matrix * ctm
+/// x, y : starting line-matrix position
+/// items : per-char list of:
+///   (cid, text, char_width, descent_or_vx, vy_if_vertical, is_vertical,
+///    spacing_adj, needcharspace)
+///   - cid: character code (for wordspace detection; 32 = ASCII space)
+///   - text: Unicode string for this character
+///   - char_width: font.char_width(cid)
+///   - descent_or_vx: horizontal → font.get_descent() (negative float, raw);
+///                    vertical   → textdisp[0] or -1.0 if None (sentinel)
+///   - vy_if_vertical: horizontal → 0.0 (unused); vertical → textdisp[1]
+///   - is_vertical: True for vertical fonts
+///   - spacing_adj: accumulated TJ spacing before this char (from pending_adj)
+///   - needcharspace: whether to add charspace before this char
+/// fontsize, scaling, charspace, wordspace, rise : text state values
+/// fontname : font.fontname string
+/// ncs, graphicstate : Python objects passed through opaquely
+///
+/// Returns (ltchars, final_x, final_y)
+#[pyfunction]
+#[pyo3(signature = (ltchar_type, matrix, x, y, items, fontsize, scaling, charspace, wordspace, rise, fontname, ncs, graphicstate))]
+#[allow(clippy::too_many_arguments)]
+pub fn build_ltchar_batch(
+    py: Python<'_>,
+    ltchar_type: &Bound<'_, PyAny>,
+    matrix: (f64, f64, f64, f64, f64, f64),
+    x: f64,
+    y: f64,
+    // Each item: (cid, text, char_width, descent_or_vx, vy_if_vertical, is_vertical,
+    //             spacing_adj, needcharspace)
+    items: Vec<(u32, String, f64, f64, f64, bool, f64, bool)>,
+    fontsize: f64,
+    scaling: f64,
+    charspace: f64,
+    wordspace: f64,
+    rise: f64,
+    fontname: String,
+    ncs: PyObject,
+    graphicstate: PyObject,
+) -> PyResult<(Vec<PyObject>, f64, f64)> {
+    let (a, b, c, d, e, f) = matrix;
+    let mut cur_x = x;
+    let mut cur_y = y;
+    let mut result: Vec<PyObject> = Vec::with_capacity(items.len());
+
+    // LTChar.__new__ + direct slot assignment bypasses __init__ while keeping
+    // the object a proper Python LTChar (isinstance checks still pass).
+    for (cid, text, char_width, descent_or_vx, vy_if_vertical, is_vertical, spacing_adj, needcharspace) in &items {
+        let is_vertical = *is_vertical;
+
+        if !is_vertical {
+            cur_x -= spacing_adj;
+            if *needcharspace { cur_x += charspace; }
+        } else {
+            cur_y -= spacing_adj;
+            if *needcharspace { cur_y += charspace; }
+        }
+
+        let te = cur_x * a + cur_y * c + e;
+        let tf = cur_x * b + cur_y * d + f;
+        let char_matrix = (a, b, c, d, te, tf);
+
+        let adv = char_width * fontsize * scaling;
+
+        let (bx0, by0, bx1, by1) = if is_vertical {
+            // descent_or_vx < 0 is the sentinel for "vx was None" in the PDF textdisp tuple
+            let vx = if *descent_or_vx < 0.0 {
+                fontsize * 0.5
+            } else {
+                descent_or_vx * fontsize * 0.001
+            };
+            let vy = (1000.0 - vy_if_vertical) * fontsize * 0.001;
+            (-vx, vy + rise + adv, -vx + fontsize, vy + rise)
+        } else {
+            let descent = descent_or_vx * fontsize;
+            (0.0, descent + rise, adv, descent + rise + fontsize)
+        };
+
+        let (rx0, ry0, rx1, ry1) = apply_matrix_rect_inner(char_matrix, bx0, by0, bx1, by1);
+        let (x0, x1) = if rx1 < rx0 { (rx1, rx0) } else { (rx0, rx1) };
+        let (y0, y1) = if ry1 < ry0 { (ry1, ry0) } else { (ry0, ry1) };
+        let width = x1 - x0;
+        let height = y1 - y0;
+        let upright = a * d * scaling > 0.0 && b * c <= 0.0;
+        let size = if is_vertical { width } else { height };
+
+        let obj = ltchar_type.call_method1("__new__", (ltchar_type,))?;
+        obj.setattr("x0", x0)?;
+        obj.setattr("y0", y0)?;
+        obj.setattr("x1", x1)?;
+        obj.setattr("y1", y1)?;
+        obj.setattr("width", width)?;
+        obj.setattr("height", height)?;
+        obj.setattr("bbox", (x0, y0, x1, y1).to_object(py))?;
+        obj.setattr("matrix", char_matrix.to_object(py))?;
+        obj.setattr("_text", text.as_str())?;
+        obj.setattr("fontname", fontname.as_str())?;
+        obj.setattr("ncs", ncs.bind(py))?;
+        obj.setattr("graphicstate", graphicstate.bind(py))?;
+        obj.setattr("adv", adv)?;
+        obj.setattr("upright", upright)?;
+        obj.setattr("size", size)?;
+        obj.setattr("rendermode", 0i64)?;
+
+        result.push(obj.into());
+
+        if !is_vertical {
+            cur_x += adv;
+            if *cid == 32 && wordspace != 0.0 { cur_x += wordspace; }
+        } else {
+            cur_y += adv;
+            if *cid == 32 && wordspace != 0.0 { cur_y += wordspace; }
+        }
+    }
+
+    Ok((result, cur_x, cur_y))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_char_advances, m)?)?;
     m.add_function(wrap_pyfunction!(text_state_to_matrix, m)?)?;
@@ -270,5 +419,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(split_ops_and_operands, m)?)?;
     m.add_function(wrap_pyfunction!(compute_char_matrices, m)?)?;
     m.add_function(wrap_pyfunction!(decode_bytes_to_cids, m)?)?;
+    m.add_function(wrap_pyfunction!(build_ltchar_batch, m)?)?;
     Ok(())
 }
