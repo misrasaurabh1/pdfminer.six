@@ -334,6 +334,9 @@ class CMapDB:
 
 
 class CMapParser(PSStackParser[PSKeyword]):
+    # CMap streams are read sequentially; enable Rust batch tokenization.
+    _rust_batch_ok = True
+
     def __init__(self, cmap: CMapBase, fp: BinaryIO) -> None:
         PSStackParser.__init__(self, fp)
         self.cmap = cmap
