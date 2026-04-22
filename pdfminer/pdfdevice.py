@@ -23,6 +23,14 @@ if TYPE_CHECKING:
         PDFTextState,
     )
 
+try:
+    import pdfminer_core as _pdfminer_core  # type: ignore[import-not-found]
+
+    _rust_compute_char_matrices = _pdfminer_core.compute_char_matrices
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+    _rust_compute_char_matrices = None
 
 PDFTextSeq = Iterable[int | float | bytes]
 
@@ -164,6 +172,39 @@ class PDFTextDevice(PDFDevice):
         (x, y) = pos
         needcharspace = False
         _render_char = self.render_char
+
+        if _HAS_RUST:
+            items: list[tuple[int, float, float, bool]] = []
+            pending_adj: float = 0.0
+            for obj in seq:
+                if isinstance(obj, (int, float)):
+                    pending_adj += obj * dxscale
+                    needcharspace = True
+                elif isinstance(obj, bytes):
+                    for cid in font.decode(obj):
+                        advance = font.char_width(cid) * fontsize * scaling
+                        items.append((cid, advance, pending_adj, needcharspace))
+                        pending_adj = 0.0
+                        needcharspace = True
+                else:
+                    logger.warning(
+                        "Cannot render horizontal string because "
+                        "%r is not a valid int, float or bytes.",
+                        obj,
+                    )
+            if not items:
+                x -= pending_adj
+                return (x, y)
+            matrices, x, _ = _rust_compute_char_matrices(
+                matrix, x, y, items, charspace, wordspace, True
+            )
+            x -= pending_adj
+            for char_matrix, item in zip(matrices, items):
+                _render_char(
+                    char_matrix, font, fontsize, scaling, rise, item[0], ncs, graphicstate
+                )
+            return (x, y)
+
         _translate_matrix = utils.translate_matrix
         for obj in seq:
             if isinstance(obj, (int, float)):
@@ -212,6 +253,39 @@ class PDFTextDevice(PDFDevice):
         (x, y) = pos
         needcharspace = False
         _render_char = self.render_char
+
+        if _HAS_RUST:
+            items: list[tuple[int, float, float, bool]] = []
+            pending_adj: float = 0.0
+            for obj in seq:
+                if isinstance(obj, (int, float)):
+                    pending_adj += obj * dxscale
+                    needcharspace = True
+                elif isinstance(obj, bytes):
+                    for cid in font.decode(obj):
+                        advance = font.char_width(cid) * fontsize * scaling
+                        items.append((cid, advance, pending_adj, needcharspace))
+                        pending_adj = 0.0
+                        needcharspace = True
+                else:
+                    logger.warning(
+                        "Cannot render vertical string because %r is not a valid "
+                        "int, float or bytes.",
+                        obj,
+                    )
+            if not items:
+                y -= pending_adj
+                return (x, y)
+            matrices, _, y = _rust_compute_char_matrices(
+                matrix, x, y, items, charspace, wordspace, False
+            )
+            y -= pending_adj
+            for char_matrix, item in zip(matrices, items):
+                _render_char(
+                    char_matrix, font, fontsize, scaling, rise, item[0], ncs, graphicstate
+                )
+            return (x, y)
+
         _translate_matrix = utils.translate_matrix
         for obj in seq:
             if isinstance(obj, (int, float)):

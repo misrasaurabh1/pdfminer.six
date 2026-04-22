@@ -197,11 +197,78 @@ pub fn apply_text_advance(
     (e_new, f_new)
 }
 
+/// Compute per-character translated matrices for a text string (horizontal or vertical).
+///
+/// Each item is `(cid, advance, spacing_adj, needcharspace)`:
+///   - `cid`: character code (used only to detect space for wordspace)
+///   - `advance`: pre-computed glyph advance = `char_width(cid) * fontsize * scaling`
+///   - `spacing_adj`: TJ-style spacing to subtract from the cursor before this glyph
+///   - `needcharspace`: whether to add `charspace` before this glyph
+///
+/// `is_horizontal`: advances along x (horizontal) or y (vertical writing).
+///
+/// Returns `(matrices, final_x, final_y)` where `matrices` has one 6-tuple per item.
+#[pyfunction]
+#[pyo3(signature = (matrix, x, y, items, charspace, wordspace, is_horizontal))]
+pub fn compute_char_matrices(
+    matrix: (f64, f64, f64, f64, f64, f64),
+    x: f64,
+    y: f64,
+    items: Vec<(u32, f64, f64, bool)>,
+    charspace: f64,
+    wordspace: f64,
+    is_horizontal: bool,
+) -> (Vec<(f64, f64, f64, f64, f64, f64)>, f64, f64) {
+    let (a, b, c, d, e, f) = matrix;
+    let mut cur_x = x;
+    let mut cur_y = y;
+    let mut matrices = Vec::with_capacity(items.len());
+
+    for (cid, advance, spacing_adj, needcharspace) in items {
+        if is_horizontal {
+            cur_x -= spacing_adj;
+            if needcharspace { cur_x += charspace; }
+        } else {
+            cur_y -= spacing_adj;
+            if needcharspace { cur_y += charspace; }
+        }
+        let te = cur_x * a + cur_y * c + e;
+        let tf = cur_x * b + cur_y * d + f;
+        matrices.push((a, b, c, d, te, tf));
+        if is_horizontal {
+            cur_x += advance;
+            if cid == 32 && wordspace != 0.0 { cur_x += wordspace; }
+        } else {
+            cur_y += advance;
+            if cid == 32 && wordspace != 0.0 { cur_y += wordspace; }
+        }
+    }
+
+    (matrices, cur_x, cur_y)
+}
+
+/// Decode bytes into CIDs using a flat 256-entry encoding table.
+///
+/// `encoding[byte]` is the CID; `u32::MAX` means unmapped (falls back to the byte
+/// value itself, matching `bytearray(data)` for simple fonts).
+/// Registered for use from Python where the encoding table is available as a list.
+#[pyfunction]
+pub fn decode_bytes_to_cids(encoding: Vec<u32>, data: &[u8]) -> Vec<u32> {
+    data.iter()
+        .map(|&b| {
+            let mapped = encoding[b as usize];
+            if mapped == u32::MAX { b as u32 } else { mapped }
+        })
+        .collect()
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calculate_char_advances, m)?)?;
     m.add_function(wrap_pyfunction!(text_state_to_matrix, m)?)?;
     m.add_function(wrap_pyfunction!(mult_matrix_rust, m)?)?;
     m.add_function(wrap_pyfunction!(apply_text_advance, m)?)?;
     m.add_function(wrap_pyfunction!(split_ops_and_operands, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_char_matrices, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_bytes_to_cids, m)?)?;
     Ok(())
 }
