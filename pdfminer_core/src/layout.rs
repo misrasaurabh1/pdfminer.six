@@ -313,6 +313,49 @@ pub fn group_textlines_fast(
     groups.into_values().collect()
 }
 
+/// For each group of character indices, compute which positions need a space
+/// character inserted before them (word-margin check).
+///
+/// Returns a list of `(char_indices, space_before_set)` where `space_before_set`
+/// contains the *position within char_indices* before which a space should be
+/// inserted.  The caller builds the final object list by iterating char_indices
+/// and prepending an LTAnno(" ") wherever the index appears in space_before_set.
+///
+/// Mirrors the logic of `LTTextLineHorizontal.add()`:
+///   if obj._type_tag == 1 and word_margin:
+///       margin = word_margin * max(obj.width, obj.height)
+///       if prev_x1 < obj.x0 - margin:
+///           insert space
+#[pyfunction]
+pub fn compute_word_gaps(
+    char_bboxes: Vec<(f64, f64, f64, f64)>,
+    groups: Vec<Vec<usize>>,
+    word_margin: f64,
+) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut result = Vec::with_capacity(groups.len());
+    for group_indices in groups {
+        let mut space_positions: Vec<usize> = Vec::new();
+        if word_margin > 0.0 && group_indices.len() > 1 {
+            let mut prev_x1 = {
+                let (_, _, x1, _) = char_bboxes[group_indices[0]];
+                x1
+            };
+            for (pos, &idx) in group_indices.iter().enumerate().skip(1) {
+                let (x0, y0, x1, y1) = char_bboxes[idx];
+                let width = x1 - x0;
+                let height = y1 - y0;
+                let margin = word_margin * width.max(height);
+                if prev_x1 < x0 - margin {
+                    space_positions.push(pos);
+                }
+                prev_x1 = x1;
+            }
+        }
+        result.push((group_indices, space_positions));
+    }
+    result
+}
+
 /// Compute pairwise bounding-box distances for group_textboxes.
 ///
 /// dist(a, b) = area(bounding_rect(a, b)) - area(a) - area(b)
@@ -342,12 +385,31 @@ pub fn compute_textbox_distances(
     dists
 }
 
+/// Expand a bounding box to include a new object's bbox.
+///
+/// Returns (min(x0, nx0), min(y0, ny0), max(x1, nx1), max(y1, ny1)).
+/// Used by LTExpandableContainer.add() to avoid Python min/max overhead.
+#[pyfunction]
+pub fn expand_bbox(
+    current: (f64, f64, f64, f64),
+    new_obj: (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    (
+        current.0.min(new_obj.0),
+        current.1.min(new_obj.1),
+        current.2.max(new_obj.2),
+        current.3.max(new_obj.3),
+    )
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Plane>()?;
     m.add_function(wrap_pyfunction!(bbox_overlap, m)?)?;
     m.add_function(wrap_pyfunction!(bbox_overlap_area, m)?)?;
     m.add_function(wrap_pyfunction!(group_chars_into_lines, m)?)?;
     m.add_function(wrap_pyfunction!(group_textlines_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_word_gaps, m)?)?;
     m.add_function(wrap_pyfunction!(compute_textbox_distances, m)?)?;
+    m.add_function(wrap_pyfunction!(expand_bbox, m)?)?;
     Ok(())
 }

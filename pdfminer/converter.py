@@ -35,10 +35,10 @@ from pdfminer.layout import (
     TextGroupElement,
 )
 from pdfminer.pdfcolor import PDFColorSpace
-from pdfminer.pdfdevice import PDFTextDevice
+from pdfminer.pdfdevice import PDFTextDevice, PDFTextSeq
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdffont import PDFFont, PDFUnicodeNotDefined
-from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager
+from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager, PDFTextState
 from pdfminer.pdfpage import PDFPage
 from pdfminer.pdftypes import PDFStream
 from pdfminer.utils import (
@@ -72,6 +72,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
         self.pageno = pageno
         self.laparams = laparams
         self._stack: list[LTLayoutContainer] = []
+        self._pending_chars: list[LTChar] = []
 
     def begin_page(self, page: PDFPage, ctm: Matrix) -> None:
         (x0, y0, x1, y1) = apply_matrix_rect(ctm, page.mediabox)
@@ -230,6 +231,20 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                 )
                 self.cur_item.add(curve)
 
+    def render_string(
+        self,
+        textstate: PDFTextState,
+        seq: PDFTextSeq,
+        ncs: PDFColorSpace,
+        graphicstate: PDFGraphicState,
+    ) -> None:
+        """Override to batch-add LTChar objects after the whole string is processed."""
+        super().render_string(textstate, seq, ncs, graphicstate)
+        pending = self._pending_chars
+        if pending:
+            self.cur_item.add_chars_batch(pending)
+            self._pending_chars = []
+
     def render_char(
         self,
         matrix: Matrix,
@@ -260,8 +275,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
             ncs,
             graphicstate,
         )
-        cur_item = self.cur_item
-        cur_item.add(item)
+        self._pending_chars.append(item)
         return item.adv
 
     def handle_undefined_char(self, font: PDFFont, cid: int) -> str:

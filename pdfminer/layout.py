@@ -37,6 +37,8 @@ try:
         group_chars_into_lines as _group_chars_into_lines,
         group_textlines_fast as _group_textlines_fast,
         compute_textbox_distances as _compute_textbox_distances,
+        compute_word_gaps as _compute_word_gaps,
+        expand_bbox as _expand_bbox,
     )
     from pdfminer.utils import _RustPlane as _FastPlane
     _HAS_RUST = True
@@ -44,6 +46,7 @@ try:
 except ImportError:
     _HAS_RUST = False
     _PlaneClass = Plane
+    _expand_bbox = None
 
 
 class IndexAssigner:
@@ -407,23 +410,22 @@ class LTChar(LTComponent, LTText):
         ncs: PDFColorSpace,
         graphicstate: PDFGraphicState,
     ) -> None:
-        LTText.__init__(self)
+        # Bypass LTText.__init__ (no-op) and LTComponent.__init__ (calls set_bbox)
+        # to eliminate 2 extra call frames per character (125k chars/run).
         self._text = text
         self.matrix = matrix
         self.fontname = font.fontname
         self.ncs = ncs
         self.graphicstate = graphicstate
         self.adv = textwidth * fontsize * scaling
-        # compute the boundary rectangle.
-        if font.is_vertical():
-            # vertical
+        vertical = font.is_vertical()
+        if vertical:
             assert isinstance(textdisp, tuple)
             (vx, vy) = textdisp
             vx = fontsize * 0.5 if vx is None else vx * fontsize * 0.001
             vy = (1000 - vy) * fontsize * 0.001
             bbox = (-vx, vy + rise + self.adv, -vx + fontsize, vy + rise)
         else:
-            # horizontal
             descent = font.get_descent() * fontsize
             bbox = (0, descent + rise, self.adv, descent + rise + fontsize)
         (a, b, c, d, _e, _f) = self.matrix
@@ -433,11 +435,15 @@ class LTChar(LTComponent, LTText):
             (x0, x1) = (x1, x0)
         if y1 < y0:
             (y0, y1) = (y1, y0)
-        LTComponent.__init__(self, (x0, y0, x1, y1))
-        if font.is_vertical():
-            self.size = self.width
-        else:
-            self.size = self.height
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+        self.width = x1 - x0
+        self.height = y1 - y0
+        self.bbox = (x0, y0, x1, y1)
+        self.rendermode = 0
+        self.size = self.width if vertical else self.height
 
     def __repr__(self) -> str:
         return (
@@ -490,14 +496,16 @@ class LTExpandableContainer(LTContainer[LTItemT]):
     # super() LTContainer only considers LTItem (no bounding box).
     def add(self, obj: LTComponent) -> None:  # type: ignore[override]
         LTContainer.add(self, cast(LTItemT, obj))
-        self.set_bbox(
-            (
+        if _expand_bbox is not None:
+            new_bbox = _expand_bbox(self.bbox, (obj.x0, obj.y0, obj.x1, obj.y1))
+        else:
+            new_bbox = (
                 min(self.x0, obj.x0),
                 min(self.y0, obj.y0),
                 max(self.x1, obj.x1),
                 max(self.y1, obj.y1),
-            ),
-        )
+            )
+        self.set_bbox(new_bbox)
 
 
 class LTTextContainer(LTExpandableContainer[LTItemT], LTText):
@@ -780,6 +788,35 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         LTContainer.__init__(self, bbox)
         self.groups: list[LTTextGroup] | None = None
 
+    def add_chars_batch(self, chars: "list[LTChar]") -> None:
+        """Add multiple LTChar objects, updating the container bbox only once.
+
+        This is faster than calling add() 125k times per page because it
+        avoids expanding the bbox on every character insertion.
+        """
+        if not chars:
+            return
+        self._objs.extend(chars)
+        bx0 = bx1 = chars[0].x0
+        by0 = by1 = chars[0].y0
+        for c in chars:
+            if c.x0 < bx0:
+                bx0 = c.x0
+            if c.y0 < by0:
+                by0 = c.y0
+            if c.x1 > bx1:
+                bx1 = c.x1
+            if c.y1 > by1:
+                by1 = c.y1
+        self.set_bbox(
+            (
+                min(self.x0, bx0),
+                min(self.y0, by0),
+                max(self.x1, bx1),
+                max(self.y1, by1),
+            )
+        )
+
     # group_objects: group text object to textlines.
     def group_objects(
         self,
@@ -1036,10 +1073,11 @@ class LTLayoutContainer(LTContainer[LTComponent]):
     ) -> "Iterator[LTTextLine]":
         """Rust-accelerated version of group_objects for horizontal-only text.
 
-        Uses pdfminer_core.group_chars_into_lines to determine grouping, then
-        constructs Python LTTextLine objects with the same logic as the Python
-        fallback.  All LT* objects remain Python instances for full
-        compatibility.
+        Uses pdfminer_core.group_chars_into_lines + compute_word_gaps to
+        determine grouping and word-space positions, then constructs
+        LTTextLineHorizontal objects directly — bypassing the per-character
+        overhead of the individual add() loop.  All LT* objects remain Python
+        instances for full compatibility.
         """
         char_bboxes = [(obj.x0, obj.y0, obj.x1, obj.y1) for obj in objs]
         groups = _group_chars_into_lines(
@@ -1047,10 +1085,55 @@ class LTLayoutContainer(LTContainer[LTComponent]):
             laparams.line_overlap,
             laparams.char_margin,
         )
-        for group_indices in groups:
-            line: LTTextLine = LTTextLineHorizontal(laparams.word_margin)
-            for idx in group_indices:
-                line.add(objs[idx])
+        _anno_space = LTAnno(" ")
+        word_margin = laparams.word_margin
+        for char_indices, space_positions in _compute_word_gaps(
+            char_bboxes, groups, word_margin
+        ):
+            # Single pass: build object list and compute bbox simultaneously.
+            first = objs[char_indices[0]]
+            lx0, ly0, lx1, ly1 = first.x0, first.y0, first.x1, first.y1
+            if space_positions:
+                # space_positions is sorted; consume with an iterator (no set needed).
+                sp_iter = iter(space_positions)
+                next_sp = next(sp_iter, None)
+                line_objs: list[LTItem] = []
+                for pos, idx in enumerate(char_indices):
+                    if pos == next_sp:
+                        line_objs.append(_anno_space)
+                        next_sp = next(sp_iter, None)
+                    ch = objs[idx]
+                    line_objs.append(ch)
+                    if ch.x0 < lx0:
+                        lx0 = ch.x0
+                    if ch.y0 < ly0:
+                        ly0 = ch.y0
+                    if ch.x1 > lx1:
+                        lx1 = ch.x1
+                    if ch.y1 > ly1:
+                        ly1 = ch.y1
+            else:
+                line_objs = []
+                for idx in char_indices:
+                    ch = objs[idx]
+                    line_objs.append(ch)  # type: ignore[arg-type]
+                    if ch.x0 < lx0:
+                        lx0 = ch.x0
+                    if ch.y0 < ly0:
+                        ly0 = ch.y0
+                    if ch.x1 > lx1:
+                        lx1 = ch.x1
+                    if ch.y1 > ly1:
+                        ly1 = ch.y1
+
+            # Build LTTextLineHorizontal without calling add() for each object.
+            line: LTTextLineHorizontal = LTTextLineHorizontal.__new__(
+                LTTextLineHorizontal
+            )
+            line.word_margin = word_margin
+            line._objs = line_objs  # type: ignore[assignment]
+            line._x1 = lx1
+            line.set_bbox((lx0, ly0, lx1, ly1))
             yield line
 
     def analyze(self, laparams: LAParams) -> None:
