@@ -32,10 +32,15 @@ from pdfminer.pdftypes import (
 from pdfminer.psexceptions import PSEOF, PSTypeError
 from pdfminer.psparser import (
     KWD,
+    KEYWORD_ARRAY_BEGIN,
+    KEYWORD_ARRAY_END,
+    KEYWORD_DICT_BEGIN,
+    KEYWORD_DICT_END,
     LIT,
     PSBaseParserToken,
     PSKeyword,
     PSLiteral,
+    PSStackEntry,
     PSStackParser,
     PSStackType,
     _RUST_TOK_KEYWORD,
@@ -81,11 +86,39 @@ def _text_advance(
     return tx * a + ty * c + e, tx * b + ty * d + f
 
 
+# Pre-computed mapping from PDF operator name → do_* method name.
+# Covers all standard operators; unknown operators fall through to the
+# string-manipulation fallback in _kw_to_method.
+_OPERATOR_TABLE: dict[str, str] = {
+    op: "do_" + op.replace("*", "_a").replace('"', "_w").replace("'", "_q")
+    for op in (
+        "w", "J", "j", "M", "d", "ri", "i", "gs",
+        "q", "Q", "cm",
+        "m", "l", "c", "v", "y", "h", "re",
+        "S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n",
+        "W", "W*",
+        "BT", "ET",
+        "Tc", "Tw", "Tz", "TL", "Tf", "Tr", "Ts",
+        "Td", "TD", "Tm", "T*",
+        "Tj", "TJ", "'", '"',
+        "d0", "d1",
+        "CS", "cs", "SC", "SCN", "sc", "scn", "G", "g",
+        "RG", "rg", "K", "k",
+        "sh",
+        "BI", "ID", "EI",
+        "Do",
+        "MP", "DP", "BMC", "BDC", "EMC",
+        "BX", "EX",
+    )
+}
+
+
 def _kw_to_method(name: str) -> str:
     """Convert a PDF operator name to the corresponding do_* method name."""
-    return "do_{}".format(
-        name.replace("*", "_a").replace('"', "_w").replace("'", "_q")
-    )
+    method = _OPERATOR_TABLE.get(name)
+    if method is not None:
+        return method
+    return "do_" + name.replace("*", "_a").replace('"', "_w").replace("'", "_q")
 
 
 class PDFResourceError(PDFException):
@@ -421,6 +454,47 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
 
     def flush(self) -> None:
         self.add_results(*self.popall())
+
+    def nextobject(self) -> "PSStackEntry[Union[PSKeyword, PDFStream]]":
+        """Fast nextobject() for the pretokenized path.
+
+        Bypasses the PSStackParser state machine for the common case — tokens
+        outside any array/dict context.  Falls back to the parent when inside
+        a nested context (array/dict) or when inline images (BI/ID) appear.
+        """
+        if not self._rust_pretokenized or self.context or self.results:
+            return super().nextobject()
+
+        tlist = self._pretokenized_list
+        tlen = len(tlist)
+
+        while True:
+            idx = self._pretokenized_pos
+            if idx >= tlen:
+                raise PSEOF("Unexpected EOF")
+            self._pretokenized_pos = idx + 1
+            pos, token = tlist[idx]
+
+            # Fast path: scalars and literals outside any context
+            if isinstance(token, (int, float, bool, bytes, PSLiteral)):
+                return (pos, token)
+
+            if isinstance(token, PSKeyword):
+                if (
+                    token is KEYWORD_ARRAY_BEGIN
+                    or token is KEYWORD_DICT_BEGIN
+                    or token is self.KEYWORD_BI
+                    or token is self.KEYWORD_ID
+                ):
+                    # Nested context or inline image — rewind and let parent handle
+                    self._pretokenized_pos = idx
+                    return super().nextobject()
+                # Plain PDF operator keyword — return directly
+                return (pos, token)
+
+            # Unknown token type — rewind and fall back
+            self._pretokenized_pos = idx
+            return super().nextobject()
 
     KEYWORD_BI = KWD(b"BI")
     KEYWORD_ID = KWD(b"ID")
