@@ -921,6 +921,7 @@ class PDFFont:
         self.bbox = self._parse_bbox(descriptor)
         self.hscale = self.vscale = 0.001
         self._char_width_cache: dict[int, float] = {}
+        self._unichr_cache: dict[int, str] = {}
 
         # PDF RM 9.8.1 specifies /Descent should always be a negative number.
         # PScript5.dll seems to produce Descent with a positive number, but
@@ -1049,13 +1050,20 @@ class PDFSimpleFont(PDFFont):
         PDFFont.__init__(self, descriptor, widths)
 
     def to_unichr(self, cid: int) -> str:
+        cached = self._unichr_cache.get(cid)
+        if cached is not None:
+            return cached
         if self.unicode_map:
             try:
-                return self.unicode_map.get_unichr(cid)
+                result = self.unicode_map.get_unichr(cid)
+                self._unichr_cache[cid] = result
+                return result
             except KeyError:
                 pass
         try:
-            return self.cid2unicode[cid]
+            result = self.cid2unicode[cid]
+            self._unichr_cache[cid] = result
+            return result
         except KeyError as err:
             raise PDFUnicodeNotDefined(None, cid) from err
 
@@ -1257,9 +1265,14 @@ class PDFCIDFont(PDFFont):
         return self.disps.get(cid, self.default_disp)
 
     def to_unichr(self, cid: int) -> str:
+        cached = self._unichr_cache.get(cid)
+        if cached is not None:
+            return cached
         try:
             if not self.unicode_map:
                 raise PDFKeyError(cid)
-            return self.unicode_map.get_unichr(cid)
+            result = self.unicode_map.get_unichr(cid)
+            self._unichr_cache[cid] = result
+            return result
         except KeyError as err:
             raise PDFUnicodeNotDefined(self.cidcoding, cid) from err
