@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple, PyType};
 
 // ─── Token types (must match Python side) ────────────────────────────────────
 // 0 = Integer   (i64)
@@ -516,8 +516,183 @@ pub fn tokenize_full_stream(
     Ok(py_list.into())
 }
 
+// ─── next_object_from_tokens ─────────────────────────────────────────────────
+
+/// Extract the `.name` bytes from a PSKeyword object without heap-allocating
+/// when the name is already a `bytes` object (the common case).
+#[inline]
+fn kw_name_bytes(tok: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let attr = tok.getattr("name")?;
+    if let Ok(b) = attr.downcast::<PyBytes>() {
+        Ok(b.as_bytes().to_vec())
+    } else {
+        attr.extract::<Vec<u8>>()
+    }
+}
+
+/// Build a Python dict from a flat slice of values taken pairwise as (key, value).
+/// Keys that are PSLiteral objects are converted to str via their `.name` attribute
+/// (UTF-8 decoded), matching what `literal_name()` does on the Python side.
+/// None values are skipped (matches the `if v is not None` guard in PSStackParser).
+#[inline]
+fn build_dict<'py>(
+    py: Python<'py>,
+    pairs: &[PyObject],
+    lit_type: &Bound<'_, PyType>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    for chunk in pairs.chunks(2) {
+        if chunk.len() < 2 {
+            break;
+        }
+        let key = chunk[0].bind(py);
+        let val = chunk[1].bind(py);
+        if val.is_none() {
+            continue;
+        }
+        // Derive string key: PSLiteral.name decoded as UTF-8 (str fallback for non-UTF-8).
+        let str_key: PyObject = if key.is_instance(lit_type).unwrap_or(false) {
+            match key.getattr("name") {
+                Ok(attr) => match attr.downcast::<PyBytes>() {
+                    Ok(b) => match std::str::from_utf8(b.as_bytes()) {
+                        Ok(s) => s.to_object(py),
+                        Err(_) => attr.to_object(py),
+                    },
+                    Err(_) => attr.to_object(py), // already a str
+                },
+                Err(_) => key.to_object(py),
+            }
+        } else {
+            key.to_object(py)
+        };
+        d.set_item(str_key, val)?;
+    }
+    Ok(d)
+}
+
+/// Process tokens from a pre-tokenized list to build the next complete object.
+///
+/// `tokens` is the `_pretokenized_list` — a Python list of `(pos, token)` 2-tuples
+/// where `token` is already a Python object (int, float, bool, bytes, PSLiteral,
+/// PSKeyword, …).
+///
+/// Returns `Some((object, new_pos))` where `new_pos` is the index *after* the
+/// last consumed token, or `None` if `start_pos >= len(tokens)`.
+///
+/// Handles nested `[ … ]` (array) and `<< … >>` (dict) construction.
+/// For PSKeyword tokens that are not structural (`[`, `]`, `<<`, `>>`), the
+/// keyword object is returned directly so the caller handles dispatch.
+#[pyfunction]
+#[pyo3(signature = (tokens, start_pos, keyword_type, literal_type))]
+pub fn next_object_from_tokens(
+    py: Python<'_>,
+    tokens: &Bound<'_, PyList>,
+    start_pos: usize,
+    keyword_type: &Bound<'_, PyType>,
+    literal_type: &Bound<'_, PyType>,
+) -> PyResult<Option<(PyObject, usize)>> {
+    let n = tokens.len();
+    if start_pos >= n {
+        return Ok(None);
+    }
+
+    let first = tokens.get_item(start_pos)?;
+    let first_tup = first.downcast::<PyTuple>()?;
+    let pos_obj: PyObject = first_tup.get_item(0)?.into();
+    let first_token = first_tup.get_item(1)?;
+
+    // int, float, bool, bytes, PSLiteral — return immediately.
+    if !first_token.is_instance(keyword_type)? {
+        let obj_tuple = PyTuple::new_bound(py, [pos_obj, first_token.into()]);
+        return Ok(Some((obj_tuple.into(), start_pos + 1)));
+    }
+
+    let kw_name = kw_name_bytes(&first_token)?;
+
+    match kw_name.as_slice() {
+        b"[" => {
+            // Collect tokens until the matching `]`, handling nesting.
+            let mut items: Vec<PyObject> = Vec::new();
+            let mut depth: usize = 1;
+            let mut idx = start_pos + 1;
+
+            while idx < n {
+                let entry = tokens.get_item(idx)?;
+                let tup = entry.downcast::<PyTuple>()?;
+                let tok = tup.get_item(1)?;
+                idx += 1;
+
+                if tok.is_instance(keyword_type)? {
+                    match kw_name_bytes(&tok)?.as_slice() {
+                        b"[" => { depth += 1; items.push(tok.into()); }
+                        b"]" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let list = PyList::new_bound(py, items.iter().map(|o| o.bind(py)));
+                                let obj_tuple = PyTuple::new_bound(py, [pos_obj, list.into_any().into()]);
+                                return Ok(Some((obj_tuple.into(), idx)));
+                            }
+                            items.push(tok.into());
+                        }
+                        _ => { items.push(tok.into()); }
+                    }
+                } else {
+                    items.push(tok.into());
+                }
+            }
+            // Unterminated array — lenient fallback, matches PSStackParser.
+            let list = PyList::new_bound(py, items.iter().map(|o| o.bind(py)));
+            let obj_tuple = PyTuple::new_bound(py, [pos_obj, list.into_any().into()]);
+            Ok(Some((obj_tuple.into(), idx)))
+        }
+
+        b"<<" => {
+            // Collect token pairs until the matching `>>`, handling nesting.
+            let mut pairs: Vec<PyObject> = Vec::new();
+            let mut depth: usize = 1;
+            let mut idx = start_pos + 1;
+
+            while idx < n {
+                let entry = tokens.get_item(idx)?;
+                let tup = entry.downcast::<PyTuple>()?;
+                let tok = tup.get_item(1)?;
+                idx += 1;
+
+                if tok.is_instance(keyword_type)? {
+                    match kw_name_bytes(&tok)?.as_slice() {
+                        b"<<" => { depth += 1; pairs.push(tok.into()); }
+                        b">>" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let d = build_dict(py, &pairs, literal_type)?;
+                                let obj_tuple = PyTuple::new_bound(py, [pos_obj, d.into_any().into()]);
+                                return Ok(Some((obj_tuple.into(), idx)));
+                            }
+                            pairs.push(tok.into());
+                        }
+                        _ => { pairs.push(tok.into()); }
+                    }
+                } else {
+                    pairs.push(tok.into());
+                }
+            }
+            // Unterminated dict — lenient fallback.
+            let d = build_dict(py, &pairs, literal_type)?;
+            let obj_tuple = PyTuple::new_bound(py, [pos_obj, d.into_any().into()]);
+            Ok(Some((obj_tuple.into(), idx)))
+        }
+
+        // `]`, `>>` at top level, and all PDF operator keywords — pass through.
+        _ => {
+            let obj_tuple = PyTuple::new_bound(py, [pos_obj, first_token.into()]);
+            Ok(Some((obj_tuple.into(), start_pos + 1)))
+        }
+    }
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(tokenize_ps_buffer, m)?)?;
     m.add_function(wrap_pyfunction!(tokenize_full_stream, m)?)?;
+    m.add_function(wrap_pyfunction!(next_object_from_tokens, m)?)?;
     Ok(())
 }

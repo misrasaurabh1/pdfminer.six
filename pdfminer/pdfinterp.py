@@ -1,5 +1,4 @@
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from io import BytesIO
 from typing import Union, cast
@@ -33,9 +32,7 @@ from pdfminer.psexceptions import PSEOF, PSTypeError
 from pdfminer.psparser import (
     KWD,
     KEYWORD_ARRAY_BEGIN,
-    KEYWORD_ARRAY_END,
     KEYWORD_DICT_BEGIN,
-    KEYWORD_DICT_END,
     LIT,
     PSBaseParserToken,
     PSKeyword,
@@ -69,11 +66,15 @@ try:
     _rust_split_ops_and_operands = getattr(
         _pdfminer_core, "split_ops_and_operands", None
     )
+    _rust_next_object_from_tokens = getattr(
+        _pdfminer_core, "next_object_from_tokens", None
+    )
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
     _rust_tokenize_full_stream = None
     _rust_split_ops_and_operands = None
+    _rust_next_object_from_tokens = None
 
 
 def _text_advance(
@@ -449,7 +450,12 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
                     data += self.buf[self.charpos :]
                     self.charpos = len(self.buf)
         data = data[: -(len(target) + 1)]  # strip the last part
-        data = re.sub(rb"(\x0d\x0a|[\x0d\x0a])$", b"", data)
+        # Strip trailing newline without scanning the full buffer.
+        # The original re.sub was O(len(data)); we only need the last 2 bytes.
+        if data.endswith(b"\r\n"):
+            data = data[:-2]
+        elif data and data[-1] in (13, 10):  # \r or \n
+            data = data[:-1]
         return (pos, data)
 
     def flush(self) -> None:
@@ -458,43 +464,31 @@ class PDFContentParser(PSStackParser[Union[PSKeyword, PDFStream]]):
     def nextobject(self) -> "PSStackEntry[Union[PSKeyword, PDFStream]]":
         """Fast nextobject() for the pretokenized path.
 
-        Bypasses the PSStackParser state machine for the common case — tokens
-        outside any array/dict context.  Falls back to the parent when inside
-        a nested context (array/dict) or when inline images (BI/ID) appear.
+        Delegates to the Rust next_object_from_tokens() helper which handles
+        scalars, arrays ([...]) and dicts (<<...>>) in a single pass over the
+        pre-tokenized list.  Inline-image keywords (BI/ID) and the active
+        context stack fall back to the parent PSStackParser state machine.
         """
-        if not self._rust_pretokenized or self.context or self.results:
+        if not self._rust_pretokenized or self.results:
             return super().nextobject()
 
         tlist = self._pretokenized_list
-        tlen = len(tlist)
+        idx = self._pretokenized_pos
 
-        while True:
-            idx = self._pretokenized_pos
-            if idx >= tlen:
-                raise PSEOF("Unexpected EOF")
-            self._pretokenized_pos = idx + 1
-            pos, token = tlist[idx]
-
-            # Fast path: scalars and literals outside any context
-            if isinstance(token, (int, float, bool, bytes, PSLiteral)):
-                return (pos, token)
-
-            if isinstance(token, PSKeyword):
-                if (
-                    token is KEYWORD_ARRAY_BEGIN
-                    or token is KEYWORD_DICT_BEGIN
-                    or token is self.KEYWORD_BI
-                    or token is self.KEYWORD_ID
-                ):
-                    # Nested context or inline image — rewind and let parent handle
-                    self._pretokenized_pos = idx
-                    return super().nextobject()
-                # Plain PDF operator keyword — return directly
-                return (pos, token)
-
-            # Unknown token type — rewind and fall back
-            self._pretokenized_pos = idx
+        # Inline images carry binary data that must be read via get_inline_data();
+        # let the parent state machine handle the BI/ID sequence.
+        if idx < len(tlist) and tlist[idx][1] in (self.KEYWORD_BI, self.KEYWORD_ID):
             return super().nextobject()
+
+        if _rust_next_object_from_tokens is not None and not self.context:
+            result = _rust_next_object_from_tokens(tlist, idx, PSKeyword, PSLiteral)
+            if result is None:
+                raise PSEOF("Unexpected EOF")
+            obj_tuple, new_pos = result
+            self._pretokenized_pos = new_pos
+            return obj_tuple
+
+        return super().nextobject()
 
     KEYWORD_BI = KWD(b"BI")
     KEYWORD_ID = KWD(b"ID")
