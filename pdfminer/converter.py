@@ -8,10 +8,8 @@ from typing import (
     Generic,
     TextIO,
     TypeVar,
-    cast,
 )
 
-from pdfminer import utils
 from pdfminer.image import ImageWriter
 from pdfminer.layout import (
     LAParams,
@@ -35,7 +33,7 @@ from pdfminer.layout import (
     TextGroupElement,
 )
 from pdfminer.pdfcolor import PDFColorSpace
-from pdfminer.pdfdevice import PDFTextDevice, PDFTextSeq
+from pdfminer.pdfdevice import PDFTextDevice, PDFTextSeq, _HAS_RUST, _rust_build_ltchar_batch
 from pdfminer.pdfexceptions import PDFValueError
 from pdfminer.pdffont import PDFFont, PDFUnicodeNotDefined
 from pdfminer.pdfinterp import PDFGraphicState, PDFResourceManager, PDFTextState
@@ -141,7 +139,8 @@ class PDFLayoutAnalyzer(PDFTextDevice):
             # their point-position in their final two arguments. (Any preceding
             # arguments represent control points on Bézier curves.)
             raw_pts = [
-                cast(Point, p[-2:] if p[0] != "h" else path[0][-2:]) for p in path
+                p[-2:] if p[0] != "h" else path[0][-2:]  # type: ignore[misc]
+                for p in path
             ]
             pts = [apply_matrix_pt(self.ctm, pt) for pt in raw_pts]
 
@@ -156,7 +155,7 @@ class PDFLayoutAnalyzer(PDFTextDevice):
                 for operation in path
             ]
             transformed_path = [
-                cast(PathSegment, (o, *p))
+                (o, *p)  # type: ignore[misc]
                 for o, p in zip(operators, transformed_points, strict=False)
             ]
 
@@ -278,6 +277,146 @@ class PDFLayoutAnalyzer(PDFTextDevice):
         self._pending_chars.append(item)
         return item.adv
 
+    def render_char_batch(self, ltchars: list) -> None:
+        """Accept pre-built LTChar objects directly (no __init__ needed)."""
+        self._pending_chars.extend(ltchars)
+
+    def render_string_horizontal(
+        self,
+        seq: PDFTextSeq,
+        matrix: Matrix,
+        pos: Point,
+        font: PDFFont,
+        fontsize: float,
+        scaling: float,
+        charspace: float,
+        wordspace: float,
+        rise: float,
+        dxscale: float,
+        ncs: PDFColorSpace,
+        graphicstate: PDFGraphicState,
+    ) -> Point:
+        if _HAS_RUST and _rust_build_ltchar_batch is not None:
+            (x, y) = pos
+            # Collect all char data in one pass, interleaving spacing adjustments
+            items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
+            pending_adj: float = 0.0
+            needcharspace = False
+            descent = font.get_descent()
+            is_vertical = False
+            for obj in seq:
+                if isinstance(obj, (int, float)):
+                    pending_adj += obj * dxscale
+                    needcharspace = True
+                elif isinstance(obj, bytes):
+                    for cid in font.decode(obj):
+                        try:
+                            text = font.to_unichr(cid)
+                        except PDFUnicodeNotDefined:
+                            text = self.handle_undefined_char(font, cid)
+                        char_width = font.char_width(cid)
+                        items.append((
+                            cid, text, char_width,
+                            descent,  # descent_or_vx for horizontal
+                            0.0,      # vy_if_vertical (unused)
+                            is_vertical,
+                            pending_adj, needcharspace,
+                        ))
+                        pending_adj = 0.0
+                        needcharspace = True
+                else:
+                    log.warning(
+                        "Cannot render horizontal string because "
+                        "%r is not a valid int, float or bytes.",
+                        obj,
+                    )
+            if not items:
+                return (x - pending_adj, y)
+            ltchars, x, _ = _rust_build_ltchar_batch(
+                LTChar, matrix, x, y, items,
+                fontsize, scaling, charspace, wordspace, rise,
+                font.fontname, ncs, graphicstate,
+            )
+            x -= pending_adj
+            self._pending_chars.extend(ltchars)
+            return (x, y)
+        # Fall back to base class implementation (uses per-char render_char)
+        return super().render_string_horizontal(
+            seq, matrix, pos, font, fontsize, scaling,
+            charspace, wordspace, rise, dxscale, ncs, graphicstate,
+        )
+
+    def render_string_vertical(
+        self,
+        seq: PDFTextSeq,
+        matrix: Matrix,
+        pos: Point,
+        font: PDFFont,
+        fontsize: float,
+        scaling: float,
+        charspace: float,
+        wordspace: float,
+        rise: float,
+        dxscale: float,
+        ncs: PDFColorSpace,
+        graphicstate: PDFGraphicState,
+    ) -> Point:
+        if _HAS_RUST and _rust_build_ltchar_batch is not None:
+            (x, y) = pos
+            items: list[tuple[int, str, float, float, float, bool, float, bool]] = []
+            pending_adj: float = 0.0
+            needcharspace = False
+            is_vertical = True
+            for obj in seq:
+                if isinstance(obj, (int, float)):
+                    pending_adj += obj * dxscale
+                    needcharspace = True
+                elif isinstance(obj, bytes):
+                    for cid in font.decode(obj):
+                        try:
+                            text = font.to_unichr(cid)
+                        except PDFUnicodeNotDefined:
+                            text = self.handle_undefined_char(font, cid)
+                        char_width = font.char_width(cid)
+                        textdisp = font.char_disp(cid)
+                        # For vertical fonts, textdisp is (vx, vy) tuple
+                        if isinstance(textdisp, tuple):
+                            vx_raw, vy_raw = textdisp
+                            # Sentinel -1.0 means vx was None
+                            vx_val = -1.0 if vx_raw is None else float(vx_raw)
+                            vy_val = float(vy_raw)
+                        else:
+                            vx_val = -1.0
+                            vy_val = 0.0
+                        items.append((
+                            cid, text, char_width,
+                            vx_val, vy_val,
+                            is_vertical,
+                            pending_adj, needcharspace,
+                        ))
+                        pending_adj = 0.0
+                        needcharspace = True
+                else:
+                    log.warning(
+                        "Cannot render vertical string because %r is not a valid "
+                        "int, float or bytes.",
+                        obj,
+                    )
+            if not items:
+                return (x, y - pending_adj)
+            ltchars, _, y = _rust_build_ltchar_batch(
+                LTChar, matrix, x, y, items,
+                fontsize, scaling, charspace, wordspace, rise,
+                font.fontname, ncs, graphicstate,
+            )
+            y -= pending_adj
+            self._pending_chars.extend(ltchars)
+            return (x, y)
+        return super().render_string_vertical(
+            seq, matrix, pos, font, fontsize, scaling,
+            charspace, wordspace, rise, dxscale, ncs, graphicstate,
+        )
+
     def handle_undefined_char(self, font: PDFFont, cid: int) -> str:
         if log.isEnabledFor(logging.DEBUG):
             log.debug("undefined: %r, %r", font, cid)
@@ -355,11 +494,10 @@ class TextConverter(PDFConverter[AnyIO]):
         self.imagewriter = imagewriter
 
     def write_text(self, text: str) -> None:
-        text = utils.compatible_encode_method(text, self.codec, "ignore")
         if self.outfp_binary:
-            cast(BinaryIO, self.outfp).write(text.encode())
+            self.outfp.write(text.encode(self.codec, errors="ignore"))  # type: ignore[union-attr]
         else:
-            cast(TextIO, self.outfp).write(text)
+            self.outfp.write(text)  # type: ignore[union-attr]
 
     def receive_layout(self, ltpage: LTPage) -> None:
         def render(item: LTItem) -> None:
@@ -466,9 +604,9 @@ class HTMLConverter(PDFConverter[AnyIO]):
 
     def write(self, text: str) -> None:
         if self.codec:
-            cast(BinaryIO, self.outfp).write(text.encode(self.codec))
+            self.outfp.write(text.encode(self.codec))  # type: ignore[union-attr]
         else:
-            cast(TextIO, self.outfp).write(text)
+            self.outfp.write(text)  # type: ignore[union-attr]
 
     def write_header(self) -> None:
         self.write("<html><head>\n")
@@ -729,9 +867,9 @@ class XMLConverter(PDFConverter[AnyIO]):
 
     def write(self, text: str) -> None:
         if self.codec:
-            cast(BinaryIO, self.outfp).write(text.encode(self.codec))
+            self.outfp.write(text.encode(self.codec))  # type: ignore[union-attr]
         else:
-            cast(TextIO, self.outfp).write(text)
+            self.outfp.write(text)  # type: ignore[union-attr]
 
     def write_header(self) -> None:
         if self.codec:
@@ -907,9 +1045,9 @@ class HOCRConverter(PDFConverter[AnyIO]):
     def write(self, text: str) -> None:
         if self.codec:
             encoded_text = text.encode(self.codec)
-            cast(BinaryIO, self.outfp).write(encoded_text)
+            self.outfp.write(encoded_text)  # type: ignore[union-attr]
         else:
-            cast(TextIO, self.outfp).write(text)
+            self.outfp.write(text)  # type: ignore[union-attr]
 
     def write_header(self) -> None:
         if self.codec:

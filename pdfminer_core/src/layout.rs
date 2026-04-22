@@ -402,6 +402,33 @@ pub fn expand_bbox(
     )
 }
 
+/// Compute the bounding box of a subset of chars identified by index.
+///
+/// `char_bboxes` is the flat list of (x0, y0, x1, y1) for every char on the
+/// page.  `indices` selects which chars to include.  Returns the enclosing
+/// (x0, y0, x1, y1).
+///
+/// Used by `_group_objects_fast` to replace the Python bbox expansion loop.
+#[pyfunction]
+pub fn compute_group_bbox(
+    char_bboxes: Vec<(f64, f64, f64, f64)>,
+    indices: Vec<usize>,
+) -> (f64, f64, f64, f64) {
+    let first = char_bboxes[indices[0]];
+    let mut lx0 = first.0;
+    let mut ly0 = first.1;
+    let mut lx1 = first.2;
+    let mut ly1 = first.3;
+    for &idx in indices.iter().skip(1) {
+        let (x0, y0, x1, y1) = char_bboxes[idx];
+        if x0 < lx0 { lx0 = x0; }
+        if y0 < ly0 { ly0 = y0; }
+        if x1 > lx1 { lx1 = x1; }
+        if y1 > ly1 { ly1 = y1; }
+    }
+    (lx0, ly0, lx1, ly1)
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Plane>()?;
     m.add_function(wrap_pyfunction!(bbox_overlap, m)?)?;
@@ -411,5 +438,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compute_word_gaps, m)?)?;
     m.add_function(wrap_pyfunction!(compute_textbox_distances, m)?)?;
     m.add_function(wrap_pyfunction!(expand_bbox, m)?)?;
+    m.add_function(wrap_pyfunction!(compute_group_bbox, m)?)?;
     Ok(())
 }

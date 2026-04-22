@@ -5,7 +5,6 @@ from typing import (
     Generic,
     TypeVar,
     Union,
-    cast,
 )
 
 from pdfminer.pdfcolor import PDFColorSpace
@@ -39,6 +38,7 @@ try:
         compute_textbox_distances as _compute_textbox_distances,
         compute_word_gaps as _compute_word_gaps,
         expand_bbox as _expand_bbox,
+        compute_group_bbox as _compute_group_bbox,
     )
     from pdfminer.utils import _RustPlane as _FastPlane
     _HAS_RUST = True
@@ -495,7 +495,7 @@ class LTExpandableContainer(LTContainer[LTItemT]):
     # Incompatible override: we take an LTComponent (with bounding box), but
     # super() LTContainer only considers LTItem (no bounding box).
     def add(self, obj: LTComponent) -> None:  # type: ignore[override]
-        LTContainer.add(self, cast(LTItemT, obj))
+        LTContainer.add(self, obj)  # type: ignore[arg-type]
         if _expand_bbox is not None:
             new_bbox = _expand_bbox(self.bbox, (obj.x0, obj.y0, obj.x1, obj.y1))
         else:
@@ -517,7 +517,7 @@ class LTTextContainer(LTExpandableContainer[LTItemT], LTText):
 
     def get_text(self) -> str:
         return "".join(
-            cast(LTText, obj).get_text() for obj in self if isinstance(obj, LTText)
+            obj.get_text() for obj in self if isinstance(obj, LTText)  # type: ignore[union-attr]
         )
 
 
@@ -557,7 +557,9 @@ class LTTextLine(LTTextContainer[TextLineElement]):
         raise NotImplementedError
 
     def is_empty(self) -> bool:
-        return super().is_empty() or self.get_text().isspace()
+        if super().is_empty():
+            return True
+        return all(obj.get_text().isspace() for obj in self._objs)
 
 
 class LTTextLineHorizontal(LTTextLine):
@@ -703,8 +705,9 @@ class LTTextBox(LTTextContainer[LTTextLine]):
     """
     __slots__ = ("index",)
 
-
     _type_tag: int = 4
+    # True for horizontal (LR-TB) boxes; LTTextBoxVertical overrides to False.
+    _is_horizontal: bool = True
 
     def __init__(self) -> None:
         LTTextContainer.__init__(self)
@@ -734,6 +737,8 @@ class LTTextBoxHorizontal(LTTextBox):
 class LTTextBoxVertical(LTTextBox):
     __slots__ = ()
 
+    _is_horizontal: bool = False
+
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
         self._objs.sort(key=lambda obj: -obj.x1)
@@ -747,6 +752,9 @@ TextGroupElement = Union[LTTextBox, "LTTextGroup"]
 
 class LTTextGroup(LTTextContainer[TextGroupElement]):
     __slots__ = ()
+
+    # True for LR-TB groups; LTTextGroupTBRL overrides to False.
+    _is_horizontal: bool = True
 
     def __init__(self, objs: Iterable[TextGroupElement]) -> None:
         super().__init__()
@@ -769,6 +777,8 @@ class LTTextGroupLRTB(LTTextGroup):
 
 class LTTextGroupTBRL(LTTextGroup):
     __slots__ = ()
+
+    _is_horizontal: bool = False
 
     def analyze(self, laparams: LAParams) -> None:
         super().analyze(laparams)
@@ -868,8 +878,9 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                     < max(obj0.height, obj1.height) * laparams.char_margin
                 )
 
-                if (halign and isinstance(line, LTTextLineHorizontal)) or (
-                    valign and isinstance(line, LTTextLineVertical)
+                if line is not None and (
+                    (halign and line._is_horizontal)
+                    or (valign and not line._is_horizontal)
                 ):
                     line.add(obj1)
                 elif line is not None:
@@ -1046,10 +1057,7 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                 if not skip_isany and isany(obj1, obj2):
                     heapq.heappush(dists, (True, d, id1, id2, obj1, obj2))
                     continue
-                if isinstance(obj1, (LTTextBoxVertical, LTTextGroupTBRL)) or isinstance(
-                    obj2,
-                    (LTTextBoxVertical, LTTextGroupTBRL),
-                ):
+                if not obj1._is_horizontal or not obj2._is_horizontal:
                     group: LTTextGroup = LTTextGroupTBRL([obj1, obj2])
                 else:
                     group = LTTextGroupLRTB([obj1, obj2])
@@ -1064,7 +1072,7 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                     )
                 plane.add(group)
         # By now only groups are in the plane
-        return [cast(LTTextGroup, g) for g in plane]
+        return list(plane)  # type: ignore[return-value]
 
     def _group_objects_fast(
         self,
@@ -1090,11 +1098,9 @@ class LTLayoutContainer(LTContainer[LTComponent]):
         for char_indices, space_positions in _compute_word_gaps(
             char_bboxes, groups, word_margin
         ):
-            # Single pass: build object list and compute bbox simultaneously.
-            first = objs[char_indices[0]]
-            lx0, ly0, lx1, ly1 = first.x0, first.y0, first.x1, first.y1
+            lx0, ly0, lx1, ly1 = _compute_group_bbox(char_bboxes, char_indices)
             if space_positions:
-                # space_positions is sorted; consume with an iterator (no set needed).
+                # Interleave LTAnno spaces at the requested positions.
                 sp_iter = iter(space_positions)
                 next_sp = next(sp_iter, None)
                 line_objs: list[LTItem] = []
@@ -1102,29 +1108,9 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                     if pos == next_sp:
                         line_objs.append(_anno_space)
                         next_sp = next(sp_iter, None)
-                    ch = objs[idx]
-                    line_objs.append(ch)
-                    if ch.x0 < lx0:
-                        lx0 = ch.x0
-                    if ch.y0 < ly0:
-                        ly0 = ch.y0
-                    if ch.x1 > lx1:
-                        lx1 = ch.x1
-                    if ch.y1 > ly1:
-                        ly1 = ch.y1
+                    line_objs.append(objs[idx])
             else:
-                line_objs = []
-                for idx in char_indices:
-                    ch = objs[idx]
-                    line_objs.append(ch)  # type: ignore[arg-type]
-                    if ch.x0 < lx0:
-                        lx0 = ch.x0
-                    if ch.y0 < ly0:
-                        ly0 = ch.y0
-                    if ch.x1 > lx1:
-                        lx1 = ch.x1
-                    if ch.y1 > ly1:
-                        ly1 = ch.y1
+                line_objs = [objs[idx] for idx in char_indices]  # type: ignore[misc]
 
             # Build LTTextLineHorizontal without calling add() for each object.
             line: LTTextLineHorizontal = LTTextLineHorizontal.__new__(
@@ -1166,7 +1152,7 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                 textbox.analyze(laparams)
 
             def getkey(box: LTTextBox) -> tuple[int, float, float]:
-                if isinstance(box, LTTextBoxVertical):
+                if not box._is_horizontal:
                     return (0, -box.x1, -box.y0)
                 else:
                     return (1, -box.y0, box.x0)
@@ -1180,9 +1166,9 @@ class LTLayoutContainer(LTContainer[LTComponent]):
                 assigner.run(group)
             textboxes.sort(key=lambda box: box.index)
         self._objs = (
-            cast(list[LTComponent], textboxes)
+            textboxes  # type: ignore[assignment]
             + otherobjs
-            + cast(list[LTComponent], empties)
+            + empties  # type: ignore[operator]
         )
 
 
